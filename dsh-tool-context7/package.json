@@ -1,0 +1,20 @@
+{
+  "name": "@deepseek-ai/dsh-tool-context7",
+  "description": "Model-facing Context7 documentation tools (resolve-library-id, query-docs) as a native Cordis plugin calling the Context7 REST API directly",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}

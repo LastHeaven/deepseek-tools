@@ -476,7 +476,13 @@ dsh-tool-firecrawl/
   README.md         # 工具清单 / 端点 / 配置表
 ```
 
-它演示了本指南的每个要点：
+另一个同类示例是 `dsh-tool-context7/`，它演示如何**把原本接 MCP 的能力改写成原生
+插件**：删掉 `cordis.patch.yml` 里的 `mcp-context7`（`@deepseek-ai/dsh-mcp-client`
+streamable-http 条目），改为注册 `tool-context7` 原生插件，直接 `fetch` 调
+Context7 的 REST API（`/v2/libs/search`、`/v2/context`），不带 `mcp__` 前缀。
+工具名为 `context7_resolve_library_id` / `context7_query_docs`。
+
+它们演示了本指南的每个要点：
 
 - `Config`（`apiUrl`/`apiKey`/逐工具开关/超时/上限）
 - `defineTool` 的参数 schema（含 `enum`、带 `additionalProperties` 的嵌套 object）
