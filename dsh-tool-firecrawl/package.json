@@ -1,0 +1,20 @@
+{
+  "name": "@deepseek-ai/dsh-tool-firecrawl",
+  "description": "Model-facing Firecrawl tools (scrape, search, map, crawl, parse, status) as a native Cordis plugin for a self-hosted Firecrawl instance",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}
