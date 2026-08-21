@@ -1,26 +1,30 @@
 // @deepseek-ai/dsh-build-panel
 //
-// Host half of the "build" workflow panel: registers the human-facing `/build`
-// command that browses and drives `docs/<任务号>/` workflows (the DSH
-// equivalent of the opencode `build.md` command), plus a client half that
-// renders the sidebar management panel.
+// Host half of the "build" workflow panel (the DSH equivalent of the opencode
+// `build.md` command). Two planes, two transports:
 //
-// The command is intentionally split into two planes:
-//   - query plane (`/build`, `/build <id> overview`): read-only scans that
-//     return JSON for the panel to render. These run against the session's
-//     real working directory via node:fs (the host process, not the sandbox).
-//   - drive plane (`/build <id> run [note]`): queues a model-visible follow-up
-//     message carrying the full workflow instruction, so the agent executes the
-//     build workflow (read index → read plan → implement → archive) exactly like
-//     the opencode command did.
+//   - browse plane: a dedicated Typert Remote service (`buildPanel` namespace)
+//     exposing `list`/`overview` RPC over the shared `/api` channel. Panel
+//     browsing is pure UI state — it appends NO session events, renders NO
+//     chat cards, and never reaches the model context.
+//   - drive plane (`/build <id> run [note]`): the human-facing slash command,
+//     which queues a model-visible follow-up message carrying the full
+//     workflow instruction, so the agent executes the build workflow (read
+//     index → read plan → implement → archive) exactly like the opencode
+//     command did. This one is intentionally logged: it changes what the
+//     agent does and belongs in the audit trail.
+//
+// Both planes run against the session's real working directory via node:fs
+// (the host process, not the sandbox).
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 /** Cordis plugin name used by loader diagnostics. */
 const name = "build-panel";
-/** Services required by the command. */
-const inject = ["commands"];
+/** Services required: the slash registry (drive plane) and sessions (cwd resolution). */
+const inject = ["commands", "sessions"];
 
 /** The model-facing workflow instruction queued by `/build <id> run`. */
 function workflowInstruction(id, extra) {
@@ -106,13 +110,13 @@ async function describeTask(root, id) {
   };
 }
 
-/** `/build` — list every task directory under docs/, newest plan first. */
-async function listResult(root) {
+/** Every task directory under docs/, newest plan first. */
+async function listTasks(root) {
   const entries = await listDir(root);
   const tasks = [];
   for (const entry of entries) {
-    const stat = await readdir(join(root, entry)).catch(() => null);
-    if (stat === null) continue; // file, not a directory
+    const probe = await readdir(join(root, entry)).catch(() => null);
+    if (probe === null) continue; // file, not a directory
     tasks.push(await describeTask(root, entry));
   }
   // Newest plan.md first; tasks without a plan keep ascending id order at the tail.
@@ -122,14 +126,14 @@ async function listResult(root) {
     if (am !== bm) return bm - am;
     return a.id < b.id ? -1 : 1;
   });
-  return { kind: "success", text: JSON.stringify({ type: "list", tasks }) };
+  return tasks;
 }
 
-/** `/build <id>` — full overview of one task directory. */
-async function overviewResult(root, id) {
+/** Full overview of one task directory. */
+async function taskOverview(root, id) {
   const dir = join(root, id);
-  const stat = await readdir(dir).catch(() => null);
-  if (stat === null) return { kind: "error", text: `任务目录 docs/${id} 不存在` };
+  const probe = await readdir(dir).catch(() => null);
+  if (probe === null) throw new Error(`任务目录 docs/${id} 不存在`);
   const todos = await listDir(join(dir, "todo"));
   const todoItems = [];
   for (const file of todos) {
@@ -138,7 +142,7 @@ async function overviewResult(root, id) {
   }
   const archive = await readOpt(join(dir, "archive.md"));
   const archiveTail = archive.split("\n").filter((line) => line.trim() !== "").slice(-6).join("\n");
-  const overview = {
+  return {
     type: "overview",
     id,
     index: await readOpt(join(dir, "index.md")),
@@ -148,35 +152,87 @@ async function overviewResult(root, id) {
     plans: await listDir(join(dir, "plans")),
     archiveTail
   };
-  return { kind: "success", text: JSON.stringify(overview) };
 }
 
-/** Register the `/build` command for every composed command adapter. */
+/**
+ * The browse plane: a dedicated Remote service whose calls are pure UI reads.
+ * Registered under the `buildPanel` wire namespace; the SRC gateway derives
+ * endpoints `buildPanel/list` and `buildPanel/overview` from the method
+ * markers below. Parameter names are wire fields, so they stay stable.
+ */
+class BuildPanelService extends TypertRemoteService {
+  constructor(ctx) {
+    super(ctx, "buildPanel");
+    this.sessions = ctx.sessions;
+  }
+
+  /** List every task directory under the session's docs/, newest plan first. */
+  async list(sessionId) {
+    const root = this.docsRoot(sessionId);
+    return { type: "list", tasks: await listTasks(root) };
+  }
+
+  /** Full overview of one task directory under the session's docs/. */
+  async overview(sessionId, id) {
+    const root = this.docsRoot(sessionId);
+    return taskOverview(root, id);
+  }
+
+  /** docs/ root of one session, failing loud when the session has no cwd. */
+  docsRoot(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) throw new Error(`会话 ${sessionId} 不存在`);
+    const cwd = session.header.cwd;
+    if (cwd === undefined || cwd === "") throw new Error("当前会话缺少工作目录 cwd");
+    return join(cwd, "docs");
+  }
+}
+
+// Apply the @Remote markers the way the decorator would: one initializer per
+// method, run against an object whose prototype chain carries the class
+// prototype, so `remoteMethods()` (WeakMap keyed by prototype) sees them on
+// every instance. This is the exact table the stage-3 decorator writes.
+{
+  const initializers = [];
+  const marker = (methodName) => {
+    Remote(BuildPanelService.prototype[methodName], {
+      private: false,
+      static: false,
+      name: methodName,
+      kind: "method",
+      addInitializer(fn) { initializers.push(fn); },
+    });
+  };
+  marker("list");
+  marker("overview");
+  const probe = Object.create(BuildPanelService.prototype);
+  for (const init of initializers) init.call(probe);
+}
+
+/** Register the browse service and the `/build` drive command. */
 function apply(ctx) {
+  new BuildPanelService(ctx);
   ctx.commands.register({
     name: "build",
-    description: "浏览并执行 docs/<任务号> 构建工作流",
-    input: { hint: "[<任务号> [run|overview]]" },
+    description: "执行 docs/<任务号> 构建工作流（浏览请用侧边栏 Build 面板）",
+    input: { hint: "<任务号> run [补充说明]" },
     handler: async (invocation) => {
       const cwd = invocation.agent.session.header.cwd;
       if (cwd === void 0 || cwd === "") return { kind: "error", text: "当前会话缺少工作目录 cwd" };
-      const root = join(cwd, "docs");
       const raw = invocation.rawInput.trim();
+      const parts = raw.split(/\s+/u);
+      const id = parts[0];
+      const sub = parts.slice(1).join(" ").trim();
+      if (id === "" || !(sub === "run" || sub.startsWith("run "))) {
+        return { kind: "error", text: '用法：/build <任务号> run [补充说明]；浏览任务请打开侧边栏 Build 面板' };
+      }
+      const extra = sub.slice(3).trim();
       try {
-        if (raw === "") return listResult(root);
-        const parts = raw.split(/\s+/u);
-        const id = parts[0];
-        const sub = parts.slice(1).join(" ").trim();
-        if (sub === "" || sub === "overview") return overviewResult(root, id);
-        if (sub === "run" || sub.startsWith("run ")) {
-          const extra = sub.slice(3).trim();
-          invocation.agent.followup(createUserMessage({
-            content: [{ type: "text", text: workflowInstruction(id, extra) }],
-            source: { kind: "user" }
-          }));
-          return { kind: "success", text: JSON.stringify({ type: "run", id, ok: true }) };
-        }
-        return { kind: "error", text: `未知子命令 "${sub}"，可用：run、overview` };
+        invocation.agent.followup(createUserMessage({
+          content: [{ type: "text", text: workflowInstruction(id, extra) }],
+          source: { kind: "user" }
+        }));
+        return { kind: "success", text: JSON.stringify({ type: "run", id, ok: true }) };
       } catch (error) {
         return { kind: "error", text: error instanceof Error ? error.message : String(error) };
       }

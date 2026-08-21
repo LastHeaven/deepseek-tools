@@ -40,6 +40,20 @@ globalThis.window = {
 };
 globalThis.document = fakeDocument;
 
+// fetch stub: capture browse RPCs and answer with a minimal list payload.
+const fetchCalls = [];
+globalThis.fetch = async (url, init) => {
+  const body = JSON.parse(init.body);
+  fetchCalls.push({ url, method: body.method, args: body.payload.args, rpcId: body.rpcId });
+  const value = body.method === "buildPanel/list"
+    ? { type: "list", tasks: [] }
+    : { type: "overview", id: body.payload.args.id, index: "", plan: "p", todos: [], finish: [], plans: [], archiveTail: "" };
+  return {
+    ok: true,
+    json: async () => ({ type: "server-response", rpcId: body.rpcId, result: { ok: true, value } })
+  };
+};
+
 // Evaluate the bundle: it should register via __ModuleLoader__.load
 new Function("window", "document", "require", code)(window, fakeDocument, (spec) => {
   if (spec === "react") return fakeReact();
@@ -61,7 +75,7 @@ const slotRegistrations = [];
 const remote = {
   commands: {
     async execute(sessionId, line, images) {
-      return { ok: true, value: { result: { kind: "success", text: JSON.stringify({ type: "list", tasks: [] }) } } };
+      return { ok: true, value: { result: { kind: "success", text: JSON.stringify({ type: "run", id: "8978", ok: true }) } } };
     }
   }
 };

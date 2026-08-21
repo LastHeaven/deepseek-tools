@@ -38,17 +38,53 @@ window.__ModuleLoader__.load({
 			return Math.floor(delta / day) + " 天前更新";
 		}
 
-		/** Call `/build` on the host through the mounted commands remote. */
-		async function runBuild(remote, sessionId, line) {
-			const res = await remote.commands.execute(sessionId, line, []);
-			if (!res.ok) return { error: res.error.message };
-			if (res.value === void 0) return { error: "未知或格式错误的命令" };
+		// ------------------------------------------------------------------
+		// host transport
+		// ------------------------------------------------------------------
+		// Browse calls ride the dedicated `buildPanel` Remote service on the
+		// shared /api channel — pure UI reads that append no session events and
+		// render no chat cards. The wire shape mirrors the generic Connection
+		// RPC caller: a `client-request` envelope POSTed to /api/<endpoint>
+		// whose payload is exactly `{ args: {...} }`, answered by
+		// `{ type: "server-response", rpcId, result }`.
+		let rpcSeq = 0;
+
+		async function callBuildPanel(endpoint, args) {
+			const rpcId = "bp-" + (++rpcSeq) + "-" + Math.random().toString(36).slice(2, 8);
+			const response = await fetch("/api/buildPanel/" + endpoint, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ type: "client-request", rpcId, method: "buildPanel/" + endpoint, payload: { args } })
+			});
+			if (!response.ok) throw new Error("传输失败：HTTP " + response.status);
+			const full = await response.json();
+			if (full.rpcId !== rpcId) throw new Error("rpcId 不匹配");
+			const result = full.result;
+			if (!result.ok) throw new Error(result.error.message);
+			return result.value;
+		}
+
+		/** Browse: list every task directory (newest plan first). */
+		async function browseList(sessionId) {
+			return callBuildPanel("list", { sessionId });
+		}
+
+		/** Browse: full overview of one task directory. */
+		async function browseOverview(sessionId, id) {
+			return callBuildPanel("overview", { sessionId, id });
+		}
+
+		/** Drive: hand the workflow instruction for one task to the agent via the /build command. */
+		async function runTaskCommand(remote, sessionId, id) {
+			const res = await remote.commands.execute(sessionId, "/build " + id + " run", []);
+			if (!res.ok) throw new Error(res.error.message);
+			if (res.value === void 0) throw new Error("未知或格式错误的命令");
 			const r = res.value.result;
-			if (r.kind === "error") return { error: r.text };
+			if (r.kind === "error") throw new Error(r.text);
 			try {
-				return { data: JSON.parse(r.text) };
+				return JSON.parse(r.text);
 			} catch {
-				return { data: r.text };
+				return r.text;
 			}
 		}
 
@@ -64,13 +100,12 @@ window.__ModuleLoader__.load({
 
 			const refresh = react.useCallback(() => {
 				setState({ phase: "loading", data: null, error: null });
-				runBuild(remote, sessionId, "/build").then((res) => {
-					if (res.error !== void 0) setState({ phase: "error", data: null, error: res.error });
-					else setState({ phase: "ready", data: res.data, error: null });
+				browseList(sessionId).then((data) => {
+					setState({ phase: "ready", data, error: null });
 				}, (err) => {
 					setState({ phase: "error", data: null, error: err instanceof Error ? err.message : String(err) });
 				});
-			}, [remote, sessionId]);
+			}, [sessionId]);
 
 			react.useEffect(() => {
 				refresh();
@@ -88,9 +123,8 @@ window.__ModuleLoader__.load({
 
 			const openDetail = (id) => {
 				setDetail({ phase: "loading", id, data: null, error: null });
-				runBuild(remote, sessionId, "/build " + id).then((res) => {
-					if (res.error !== void 0) setDetail({ phase: "error", id, data: null, error: res.error });
-					else setDetail({ phase: "ready", id, data: res.data, error: null });
+				browseOverview(sessionId, id).then((data) => {
+					setDetail({ phase: "ready", id, data, error: null });
 				}, (err) => {
 					setDetail({ phase: "error", id, data: null, error: err instanceof Error ? err.message : String(err) });
 				});
@@ -98,8 +132,8 @@ window.__ModuleLoader__.load({
 
 			const runTask = (id) => {
 				setDetail({ phase: "running", id, data: detail.data, error: null });
-				runBuild(remote, sessionId, "/build " + id + " run").then((res) => {
-					setDetail({ phase: "done", id, data: res.data, error: res.error });
+				runTaskCommand(remote, sessionId, id).then((data) => {
+					setDetail({ phase: "done", id, data, error: null });
 				}, (err) => {
 					setDetail({ phase: "error", id, data: detail.data, error: err instanceof Error ? err.message : String(err) });
 				});
