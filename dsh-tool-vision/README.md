@@ -16,9 +16,10 @@ user image ──▶ vision backend (real multimodal LLM) ──▶ text
                  non-vision model reads the text as if it had seen the image
 ```
 
-1. The image (URL or local file) is sent to a **vision-capable backend** — a
-   real multimodal model behind an OpenAI-compatible `/v1/chat/completions`
-   endpoint that accepts an `image_url` content part.
+1. The image (URL, local file, or DSH attachment sha256 reference) is sent to a
+   **vision-capable backend** — a real multimodal model behind an
+   OpenAI-compatible `/v1/chat/completions` endpoint that accepts an
+   `image_url` content part.
 2. That backend returns a **text** answer: a caption, an OCR transcript, or a
    direct reply to a visual question.
 3. The text is injected into the non-vision model's context as ordinary text.
@@ -27,6 +28,25 @@ user image ──▶ vision backend (real multimodal LLM) ──▶ text
 
 This plugin is the bridge. It registers one model-facing tool, `describe_image`,
 and performs steps 1–2 on the model's behalf.
+
+## Image references
+
+`describe_image` accepts **three** forms for its `image` argument:
+
+| Form | Example | Resolution |
+| --- | --- | --- |
+| http(s) URL | `https://example.com/pic.png` | Fetched, then base64-embedded |
+| Local file path | `C:\shots\ui.png` | Read, then base64-embedded |
+| DSH attachment sha256 ref | `c2872d81dd03f094713cca90eba7b0b2ab834e27599b6a7016d7cb124e268402` (or `sha256:`-prefixed) | Resolved against the local attachment store, then base64-embedded |
+
+The **sha256 form** is what the Web GUI's attachment picker hands to the model
+when the user drops an image onto the chat. The plugin maps the digest to the
+content-addressed object at
+`$DSH_HOME/attachments/v1/objects/<first-2-hex>/<full-sha256>`, reads the bytes,
+**sniffs the real MIME type from the file header** (the object has no
+extension), and embeds the image exactly like a normal path. A digest with no
+matching object raises an actionable error naming the store path, so the model
+can tell the user the image is unavailable on this machine.
 
 ## Capability gating
 
@@ -55,7 +75,7 @@ name.
 
 | Tool | Purpose |
 | --- | --- |
-| `describe_image` | Give the text-only model vision. Takes an `image` (URL or local path) and a `prompt` (what to extract), returns the backend's text answer. |
+| `describe_image` | Give the text-only model vision. Takes an `image` (URL, local path, or DSH attachment sha256 ref) and a `prompt` (what to extract), returns the backend's text answer. |
 
 ## Backend
 
@@ -144,8 +164,16 @@ Copy-Item "$src\lib\index.js" "$dst\lib\index.js" -Force
 
 ```powershell
 node "D:\git\deepseek-tools\dsh-tool-vision\smoke-test.mjs"
+node "D:\git\deepseek-tools\dsh-tool-vision\local-path-test.mjs"
+node "D:\git\deepseek-tools\dsh-tool-vision\sha256-ref-test.mjs"
 node "D:\npm\node_global\node_modules\@deepseek-ai\dsh\lib\bin.js" --profile web --dump-config
 ```
+
+`sha256-ref-test.mjs` creates an isolated `$DSH_HOME` under the OS temp dir and
+proves the sha256 form resolves against the real store layout (`attachments/v1/
+objects/<2-hex>/<digest>`), sniffs PNG from the header, accepts
+`sha256:`-prefixed and uppercase digests, and fails with an actionable error for
+missing digests — without touching your real attachment store.
 
 ## Backend caveats
 

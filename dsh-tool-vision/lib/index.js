@@ -2,6 +2,25 @@
 //
 // Standalone vision tool plugin for a NON-vision (text-only) model.
 //
+// IMAGE REFERENCES
+// ----------------
+// `describe_image` accepts three forms for its `image` argument:
+//   - http(s) URL                 -> fetched, then base64-embedded
+//   - local file path             -> read,   then base64-embedded
+//   - DSH attachment sha256 ref   -> resolved against the local attachment
+//                                    store, then base64-embedded
+//
+// The sha256 form is a bare 64-hex digest (optionally `sha256:`-prefixed),
+// e.g. `c2872d81dd03f094713cca90eba7b0b2ab834e27599b6a7016d7cb124e268402`.
+// That is the reference the Web GUI hands to the model when the user drops an
+// image onto the chat: the file is stored CONTENT-ADDRESSED at
+// `$DSH_HOME/attachments/v1/objects/<first-2-hex>/<full-sha256>` with no
+// extension (the bytes themselves are a PNG/JPEG/WebP/GIF). The model can
+// therefore pass the digest straight to this tool and the plugin maps it to
+// the stored object, reads the bytes, sniffs the real MIME from the file
+// header, and embeds the image as a base64 data: URI — exactly as if the user
+// had pasted a normal file path.
+//
 // THE TECHNIQUE
 // -------------
 // A plain language model has no way to read pixels. This plugin gives it sight
@@ -49,8 +68,10 @@
 //   response: { choices: [ { message: { content: <text> } } ] }
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
-import { resolve as resolvePath } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve as resolvePath } from "node:path";
 
 /** Cordis plugin name used by loader diagnostics. */
 const name = "tool-vision";
@@ -114,30 +135,94 @@ function isHttpUrl(value) {
   return /^https?:\/\//i.test(String(value || "").trim());
 }
 
-/**
- * Resolve an image reference into a normalized descriptor the backend expects.
- * Both forms are emitted as BASE64 so the backend never has to fetch a remote
- * URL itself — some OpenAI-compatible proxies (e.g. newapi/CodeBuddy) reject
- * remote http(s) image URLs but accept embedded data: URIs.
- *   - http(s) URL -> fetched, then { kind: "base64", value, mime }
- *   - local path  -> read,      then { kind: "base64", value, mime }
- */
-async function resolveImage(config, image, signal) {
-  if (isHttpUrl(image)) {
-    const res = await fetch(image.trim(), { method: "GET", signal });
-    if (!res.ok) {
-      throw new Error(`tool-vision: failed to download image ${image.trim()} (HTTP ${res.status})`);
-    }
-    const buffer = new Uint8Array(await res.arrayBuffer());
-    const mime = res.headers.get("content-type") || "image/png";
-    return { kind: "base64", value: Buffer.from(buffer).toString("base64"), mime };
-  }
-  const abs = resolvePath(image);
-  const buffer = await readFile(abs);
-  const mime = inferImageMime(abs);
-  const b64 = buffer.toString("base64");
-  return { kind: "base64", value: b64, mime };
+// ---------------------------------------------------------------------------
+// DSH attachment sha256 references
+// ---------------------------------------------------------------------------
+
+/** Matches a bare 64-hex sha256 digest, optionally `sha256:`-prefixed. */
+const SHA256_REF_PATTERN = /^(?:sha256:)?([a-f0-9]{64})$/i;
+
+/** Default DSH home when `$DSH_HOME` is not set (`~/.dsh`). */
+function defaultDshHome() {
+  return join(homedir(), ".dsh");
 }
+
+/** Resolve the DSH home: `$DSH_HOME` wins, otherwise `~/.dsh`. */
+function dshHome() {
+  const fromEnv = process.env.DSH_HOME;
+  return typeof fromEnv === "string" && fromEnv.trim() !== "" ? fromEnv.trim() : defaultDshHome();
+}
+
+/**
+ * Content-addressed attachment object path for one sha256 digest:
+ * `$DSH_HOME/attachments/v1/objects/<first-2-hex>/<full-sha256>`.
+ * Mirrors the layout of the dsh-attachment-local store.
+ */
+function attachmentObjectPath(sha256) {
+  return join(dshHome(), "attachments", "v1", "objects", sha256.slice(0, 2), sha256);
+}
+
+/**
+ * Is `value` a DSH attachment sha256 reference (bare digest or
+ * `sha256:`-prefixed)? These are the references the Web GUI's attachment
+ * picker hands to the model.
+ */
+function isSha256Reference(value) {
+  const match = SHA256_REF_PATTERN.exec(String(value || "").trim());
+  return match !== null;
+}
+
+// ---------------------------------------------------------------------------
+// MIME sniffing
+// ---------------------------------------------------------------------------
+
+/**
+ * Sniff the MIME type of image bytes from their magic number, so files
+ * WITHOUT an extension (like content-addressed attachment objects) still
+ * embed with the correct `data:` URI media type. Falls back to a supplied
+ * default (or png) when the header is not recognized.
+ */
+function sniffImageMime(buffer, fallback = "image/png") {
+  if (buffer.length >= 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    return "image/png";
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (buffer.length >= 6 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+    return "image/gif";
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
+    buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  if (buffer.length >= 12 && buffer[0] === 0x42 && buffer[1] === 0x4d) {
+    return "image/bmp";
+  }
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x49 && buffer[1] === 0x49 &&
+    buffer[2] === 0x2a && buffer[3] === 0x00
+  ) {
+    return "image/tiff";
+  }
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x4d && buffer[1] === 0x4d &&
+    buffer[2] === 0x00 && buffer[3] === 0x2a
+  ) {
+    return "image/tiff";
+  }
+  if (buffer.length >= 12 && buffer[0] === 0x00 && buffer[1] === 0x00 && buffer[2] === 0x00 && buffer[3] === 0x1c) {
+    return "image/avif";
+  }
+  return fallback;
+}
+
+/** Guess an image MIME type from extension (defaulting to png). */
 
 /** Guess an image MIME type from extension (defaulting to png). */
 function inferImageMime(filename) {
@@ -154,6 +239,56 @@ function inferImageMime(filename) {
     ".tif": "image/tiff"
   };
   return map[ext] || "image/png";
+}
+
+/**
+ * Resolve an image reference into a normalized descriptor the backend expects.
+ * Every form is emitted as BASE64 so the backend never has to fetch a remote
+ * URL itself — some OpenAI-compatible proxies (e.g. newapi/CodeBuddy) reject
+ * remote http(s) image URLs but accept embedded data: URIs.
+ *   - http(s) URL             -> fetched, then { kind: "base64", value, mime }
+ *   - local path              -> read,    then { kind: "base64", value, mime }
+ *   - DSH attachment sha256   -> read from the local attachment store, then
+ *                                { kind: "base64", value, mime } (MIME sniffed
+ *                                from the bytes; the object has no extension)
+ */
+async function resolveImage(config, image, signal) {
+  const trimmed = String(image || "").trim();
+  if (isHttpUrl(trimmed)) {
+    const res = await fetch(trimmed, { method: "GET", signal });
+    if (!res.ok) {
+      throw new Error(`tool-vision: failed to download image ${trimmed} (HTTP ${res.status})`);
+    }
+    const buffer = new Uint8Array(await res.arrayBuffer());
+    const mime = res.headers.get("content-type") || sniffImageMime(buffer, "image/png");
+    return { kind: "base64", value: Buffer.from(buffer).toString("base64"), mime };
+  }
+
+  // DSH attachment sha256 reference (bare digest or `sha256:`-prefixed).
+  const shaMatch = SHA256_REF_PATTERN.exec(trimmed);
+  if (shaMatch !== null) {
+    const sha256 = shaMatch[1].toLowerCase();
+    const objectPath = attachmentObjectPath(sha256);
+    let buffer;
+    try {
+      buffer = await readFile(objectPath);
+    } catch (error) {
+      const code = error?.code ?? "";
+      const hint =
+        code === "ENOENT"
+          ? `no attachment object at ${objectPath} — the digest may not belong to this machine's attachment store`
+          : String(error?.message ?? error);
+      throw new Error(`tool-vision: could not read DSH attachment ${sha256}: ${hint}`);
+    }
+    const mime = sniffImageMime(buffer);
+    return { kind: "base64", value: buffer.toString("base64"), mime };
+  }
+
+  const abs = resolvePath(trimmed);
+  const buffer = await readFile(abs);
+  const mime = inferImageMime(abs);
+  const b64 = buffer.toString("base64");
+  return { kind: "base64", value: b64, mime };
 }
 
 async function visionComplete(config, image, prompt, signal) {
@@ -258,16 +393,16 @@ function applyDescribeImageTool(ctx, config) {
     name: VISION_SECTION,
     order: 119,
     text:
-      "Use the describe_image tool to let this text-only model 'see' an image. Pass an image URL or a local file path plus a question or description instruction. " +
+      "Use the describe_image tool to let this text-only model 'see' an image. Pass an image URL, a local file path, or a DSH attachment sha256 reference (a bare 64-hex digest such as c2872d81dd03f094713cca90eba7b0b2ab834e27599b6a7016d7cb124e268402 — the form the attachment picker hands to the model) plus a question or description instruction. " +
       "The tool routes the image to a vision-capable backend and returns its text answer, which you should treat as if you had looked at the image yourself. " +
       "Use it whenever the user references an image, screenshot, diagram, chart, or any visual content. Ask specific questions (e.g. 'What text is in this screenshot?', 'Describe this UI layout') for best results."
   });
   ctx.tools.register(defineTool({
     name: "describe_image",
     description:
-      "Give this text-only model vision by routing an image to a multimodal backend and returning its text answer. Accepts an image URL or a local file path (read and embedded automatically) plus a prompt describing what to extract. Use it to read screenshots, diagrams, charts, OCR document text, or answer visual questions. This is the model's 'eyes'.",
+      "Give this text-only model vision by routing an image to a multimodal backend and returning its text answer. Accepts an image URL, a local file path, or a DSH attachment sha256 reference (bare 64-hex digest, e.g. c2872d81dd03f094713cca90eba7b0b2ab834e27599b6a7016d7cb124e268402 — read and embedded automatically) plus a prompt describing what to extract. Use it to read screenshots, diagrams, charts, OCR document text, or answer visual questions. This is the model's 'eyes'.",
     parameters: {
-      image: { type: "string", required: true, description: "Image URL (http/https) or a local file path to read and embed." },
+      image: { type: "string", required: true, description: "Image URL (http/https), a local file path, or a DSH attachment sha256 reference (64-hex digest) to read and embed." },
       prompt: { type: "string", required: true, description: "What to ask about the image, e.g. 'Transcribe all text', 'Describe this diagram', 'What color is the button?'." },
       detail: { type: "string", enum: DETAIL_LEVELS, description: "Vision detail level: 'low' (cheaper, faster), 'high' (more tokens, finer detail), or 'auto' (backend default)." }
     },

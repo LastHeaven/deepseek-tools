@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-tool-vision",
-  "description": "Standalone vision tool plugin: lets a non-vision (text-only) model 'see' an image by routing it to an OpenAI-compatible vision backend and returning a text description/answer into the model context.",
-  "version": "0.1.0",
+  "description": "Standalone vision tool plugin: lets a non-vision (text-only) model 'see' an image by routing it to an OpenAI-compatible vision backend and returning a text description/answer into the model context. Accepts URLs, local paths, and DSH attachment sha256 references.",
+  "version": "0.1.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
