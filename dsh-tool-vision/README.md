@@ -28,6 +28,29 @@ user image ──▶ vision backend (real multimodal LLM) ──▶ text
 This plugin is the bridge. It registers one model-facing tool, `describe_image`,
 and performs steps 1–2 on the model's behalf.
 
+## Capability gating
+
+`describe_image` is a workaround for models that cannot read pixels. When the
+routed model **can** read images itself, the bridge is redundant and the
+harness's own `read_image` tool is the right path. The plugin therefore
+inspects the routed model's declared input modalities
+(`ctx.llm.resolveModelInfo(...).inputModalities`) at prompt-assembly time and
+masks the tool catalog the model is shown:
+
+| Routed model declares `image` | `describe_image` | `read_image` |
+| --- | --- | --- |
+| Yes (vision model) | hidden (+ guidance removed) | kept |
+| No (text-only model) | kept | hidden |
+| Unknown / no modality info | kept | hidden |
+
+`read_image` survives only on a **positive** `image` declaration; a text-only
+model, an adapter that does not declare modalities, or a failed capability
+lookup all hide it and keep `describe_image`. The mask is re-evaluated on every
+prompt assembly, so a mid-session model switch is reflected on the next step.
+`read_image` additionally self-gates at execution (`dsh-tool-fs`), so a
+non-vision model can never read pixels even if it guesses the hidden tool's
+name.
+
 ## Tools
 
 | Tool | Purpose |

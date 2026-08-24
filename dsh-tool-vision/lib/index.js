@@ -24,6 +24,22 @@
 // takes an image (URL or local path) + a prompt and returns the backend's text
 // answer. The model using this tool is therefore able to "see" by proxy.
 //
+// CAPABILITY GATING
+// -----------------
+// `describe_image` is only useful when the routed model CANNOT read pixels
+// itself, while the harness's own `read_image` tool is only useful when it
+// CAN. This plugin therefore inspects the routed model's declared input
+// modalities (ctx.llm.resolveModelInfo(...).inputModalities) at prompt-assembly
+// time and masks the FINAL tool schemas the loop sends to the model:
+//   - vision model    (declares "image") -> hides `describe_image`, keeps `read_image`
+//   - text-only model (no "image")       -> hides `read_image`, keeps `describe_image`
+//   - unknown/undeclared (no modality info) -> hides `read_image`, keeps `describe_image`
+// `read_image` survives only on a POSITIVE "image" declaration. The mask is
+// re-evaluated on every assembly, so a mid-session model switch is reflected
+// on the next step. `read_image` additionally self-gates at execution
+// (dsh-tool-fs), so a non-vision model can never read pixels even if it
+// guesses the hidden tool's name.
+//
 // Verified backend contract (OpenAI-compatible vision chat completions):
 //   POST {apiUrl}/chat/completions
 //   body: { model, messages: [ { role: "user", content: [
@@ -52,6 +68,9 @@ const DEFAULT_MODEL = "gpt-4o";
 
 /** Vision detail presets accepted by the backend. */
 const DETAIL_LEVELS = ["auto", "low", "high"];
+
+/** Prompt-section name carrying the `describe_image` guidance (removed for vision models). */
+const VISION_SECTION = "tool:vision";
 
 /** Plugin config, resolved by the loader (schemastery defaults applied). */
 const Config = z.object({
@@ -236,7 +255,7 @@ function stringOutput() {
 
 function applyDescribeImageTool(ctx, config) {
   ctx.systemPrompt.section({
-    name: "tool:vision",
+    name: VISION_SECTION,
     order: 119,
     text:
       "Use the describe_image tool to let this text-only model 'see' an image. Pass an image URL or a local file path plus a question or description instruction. " +
@@ -270,6 +289,53 @@ function applyDescribeImageTool(ctx, config) {
 }
 
 // ---------------------------------------------------------------------------
+// Capability gating
+// ---------------------------------------------------------------------------
+
+/** The harness's own image tool, hidden unless the routed model is confirmed vision-capable. */
+const NATIVE_IMAGE_TOOL = "read_image";
+
+/**
+ * Resolve the routed model's image capability for one prompt assembly.
+ *   - `true`      -> the model declares "image" input
+ *   - `false`     -> the model does NOT declare "image", OR the adapter
+ *                    declined to declare modalities, OR resolution failed
+ *   - `undefined` -> no routed model to resolve (a bare/diagnostic assembly
+ *                    with no agent/provider/model): the catalog is left alone
+ *
+ * Only a POSITIVE "image" declaration keeps `read_image` visible; every other
+ * outcome hides it and keeps `describe_image`.
+ */
+async function resolveModelHasImage(ctx, context) {
+  const agent = context.agent;
+  const llm = ctx.get("llm");
+  if (llm === void 0) return void 0;
+  const header = agent?.session?.requestHeader?.();
+  const provider = header?.config?.provider ?? agent?.options?.provider;
+  const model = header?.config?.model ?? agent?.options?.model;
+  if (typeof provider !== "string" || typeof model !== "string") return void 0;
+  let info;
+  try {
+    info = await llm.resolveModelInfo(provider, model, context.signal);
+  } catch (error) {
+    ctx.logger?.warn?.(`tool-vision: could not resolve image capability for model "${model}"; treating it as non-vision and hiding read_image: ${error?.message ?? String(error)}`);
+    return false;
+  }
+  if (info.inputModalities === void 0) return false;
+  return info.inputModalities.includes("image");
+}
+
+/**
+ * Mask one assembly's tool schemas to the routed model's capability:
+ *   - vision model (`hasImage === true`) -> remove `describe_image`
+ *   - anything else (text-only, unknown, undeclared) -> remove `read_image`
+ */
+function maskToolSchemas(schemas, hasImage) {
+  const deny = hasImage === true ? "describe_image" : NATIVE_IMAGE_TOOL;
+  return schemas.filter((schema) => schema.name !== deny);
+}
+
+// ---------------------------------------------------------------------------
 // Plugin entry
 // ---------------------------------------------------------------------------
 
@@ -284,6 +350,25 @@ function apply(ctx, config) {
     throw new Error(`tool-vision: imageFormat must be one of ${FORMATS.join(", ")}`);
   }
   applyDescribeImageTool(ctx, config);
+  ctx.inject(["llm"], (llmCtx) => {
+    // Prompt-assembly capability mask. Runs around the `system-prompt/assemble`
+    // waterfall so the FINAL tool schemas the loop sends to the model are
+    // masked: a vision model loses `describe_image` (and its guidance
+    // section), a text-only model loses `read_image`. Re-evaluated every step,
+    // so a mid-session model switch is reflected on the next assembly.
+    llmCtx.on("system-prompt/assemble", async (assembly, context, next) => {
+      const hasImage = await resolveModelHasImage(llmCtx, context);
+      const assembled = await next();
+      if (hasImage === undefined) return assembled;
+      return {
+        ...assembled,
+        tools: maskToolSchemas(assembled.tools, hasImage),
+        sections: hasImage === true
+          ? assembled.sections.filter((section) => section.name !== VISION_SECTION)
+          : assembled.sections
+      };
+    });
+  });
 }
 
 export { Config, DEFAULT_TIMEOUT_MS, apply, inject, name };

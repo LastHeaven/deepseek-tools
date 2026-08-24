@@ -12,7 +12,8 @@ const { apply } = await import(
 const registered = [];
 const ctx = {
   tools: { register(def) { registered.push(def); return () => {}; } },
-  systemPrompt: { section() { return () => {}; } }
+  systemPrompt: { section() { return () => {}; } },
+  inject(_deps, cb) { cb({ on() { return () => {}; }, get() { return void 0; }, logger: { warn() {} } }); }
 };
 
 apply(ctx, {
