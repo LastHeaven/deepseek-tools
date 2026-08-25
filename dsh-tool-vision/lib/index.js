@@ -10,16 +10,17 @@
 //   - DSH attachment sha256 ref   -> resolved against the local attachment
 //                                    store, then base64-embedded
 //
-// The sha256 form is a bare 64-hex digest (optionally `sha256:`-prefixed),
-// e.g. `c2872d81dd03f094713cca90eba7b0b2ab834e27599b6a7016d7cb124e268402`.
-// That is the reference the Web GUI hands to the model when the user drops an
-// image onto the chat: the file is stored CONTENT-ADDRESSED at
-// `$DSH_HOME/attachments/v1/objects/<first-2-hex>/<full-sha256>` with no
-// extension (the bytes themselves are a PNG/JPEG/WebP/GIF). The model can
-// therefore pass the digest straight to this tool and the plugin maps it to
-// the stored object, reads the bytes, sniffs the real MIME from the file
-// header, and embeds the image as a base64 data: URI — exactly as if the user
-// had pasted a normal file path.
+// The digest form is hex characters (optionally `sha256:`-prefixed): either a
+// full 64-hex sha256, or an 8+ character prefix resolved by scanning the local
+// store. Prefixes matter because DSH's built-in text-only image projection
+// leaves placeholders like `[image omitted … attachment sha256:c2872d81]` —
+// only the first 8 hex chars of the digest. That is what the model sees when a
+// user drops an image onto the chat (the admission bridge lets that message
+// through the host's model-capability gate), so describe_image maps the prefix
+// back to the full content-addressed object at
+// `$DSH_HOME/attachments/v1/objects/<first-2-hex>/<full-sha256>` (no
+// extension; the bytes themselves are a PNG/JPEG/WebP/GIF), sniffs the real
+// MIME from the file header, and embeds the image as a base64 data: URI.
 //
 // THE TECHNIQUE
 // -------------
@@ -69,7 +70,7 @@
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { homedir } from "node:os";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 
@@ -109,7 +110,17 @@ const Config = z.object({
   // carries base64 media_type+data or a url (the Claude-style schema).
   imageFormat: z.string().default("openai"),
   timeoutMs: z.number().default(DEFAULT_TIMEOUT_MS),
-  maxOutputChars: z.number().default(200000)
+  maxOutputChars: z.number().default(200000),
+  // Admission bridge. The host's prompt gate (api-proxy) rejects any message
+  // carrying an image part with "当前模型不支持图片" unless the session model
+  // declares `image` input via the llm runtime's PUBLIC resolveModelInfo.
+  // When true, this plugin wraps that public method so text-only models also
+  // report `image`, letting attachments into the session. Internal dispatch
+  // still resolves TRUE modalities, so dsh-llm projects the attached images
+  // into stable `[image omitted … attachment sha256:<8-hex>]` placeholders —
+  // which describe_image then resolves (prefix lookup) and routes to the
+  // vision backend.
+  bridgeAttachments: z.boolean().default(true)
 });
 
 function assertPositiveInteger(label, value) {
@@ -139,8 +150,8 @@ function isHttpUrl(value) {
 // DSH attachment sha256 references
 // ---------------------------------------------------------------------------
 
-/** Matches a bare 64-hex sha256 digest, optionally `sha256:`-prefixed. */
-const SHA256_REF_PATTERN = /^(?:sha256:)?([a-f0-9]{64})$/i;
+/** Matches a DSH attachment digest reference: 8..64 hex chars, optionally `sha256:`-prefixed. Full 64-hex digests resolve directly; shorter prefixes are resolved by scanning the local attachment store (see resolveAttachmentDigest). */
+const SHA256_REF_PATTERN = /^(?:sha256:)?([a-f0-9]{8,64})$/i;
 
 /** Default DSH home when `$DSH_HOME` is not set (`~/.dsh`). */
 function defaultDshHome() {
@@ -154,12 +165,58 @@ function dshHome() {
 }
 
 /**
- * Content-addressed attachment object path for one sha256 digest:
+ * Content-addressed attachment object path for one FULL sha256 digest:
  * `$DSH_HOME/attachments/v1/objects/<first-2-hex>/<full-sha256>`.
  * Mirrors the layout of the dsh-attachment-local store.
  */
 function attachmentObjectPath(sha256) {
   return join(dshHome(), "attachments", "v1", "objects", sha256.slice(0, 2), sha256);
+}
+
+/**
+ * Resolve one attachment digest reference into its full digest and object path.
+ * A full 64-hex digest maps directly onto the content-addressed layout; a
+ * shorter prefix (8+ hex chars — the form DSH's built-in text-only projection
+ * leaves behind: `[image omitted … attachment sha256:c2872d81]`) is resolved
+ * by scanning the local store, which is expected to be small enough that an
+ * 8-hex (32-bit) prefix is unique. Zero matches and ambiguous prefixes raise
+ * actionable errors so the model can tell the user what went wrong.
+ */
+async function resolveAttachmentDigest(digest) {
+  const objectsDir = join(dshHome(), "attachments", "v1", "objects");
+  const lowered = digest.toLowerCase();
+  if (lowered.length === 64) {
+    return { sha256: lowered, objectPath: join(objectsDir, lowered.slice(0, 2), lowered) };
+  }
+  let matches;
+  try {
+    matches = [];
+    const dirs = await readdir(objectsDir);
+    for (const dir of dirs) {
+      if (!/^[a-f0-9]{2}$/i.test(dir)) continue;
+      let entries;
+      try {
+        entries = await readdir(join(objectsDir, dir));
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (entry.length === 64 && entry.toLowerCase().startsWith(lowered)) {
+          matches.push(entry.toLowerCase());
+        }
+      }
+    }
+  } catch (error) {
+    throw new Error(`tool-vision: could not scan DSH attachment store at ${objectsDir}: ${String(error?.message ?? error)}`);
+  }
+  if (matches.length === 0) {
+    throw new Error(`tool-vision: no DSH attachment matches digest prefix "${digest}" under ${objectsDir} — the image may not exist on this machine`);
+  }
+  if (matches.length > 1) {
+    throw new Error(`tool-vision: digest prefix "${digest}" is ambiguous (${matches.length} attachments match) — provide more hex characters`);
+  }
+  const sha256 = matches[0];
+  return { sha256, objectPath: join(objectsDir, sha256.slice(0, 2), sha256) };
 }
 
 /**
@@ -264,11 +321,11 @@ async function resolveImage(config, image, signal) {
     return { kind: "base64", value: Buffer.from(buffer).toString("base64"), mime };
   }
 
-  // DSH attachment sha256 reference (bare digest or `sha256:`-prefixed).
+  // DSH attachment digest reference (full 64-hex digest, or a shorter
+  // prefix such as the one DSH's text-only image projection leaves behind).
   const shaMatch = SHA256_REF_PATTERN.exec(trimmed);
   if (shaMatch !== null) {
-    const sha256 = shaMatch[1].toLowerCase();
-    const objectPath = attachmentObjectPath(sha256);
+    const { sha256, objectPath } = await resolveAttachmentDigest(shaMatch[1]);
     let buffer;
     try {
       buffer = await readFile(objectPath);
@@ -393,16 +450,17 @@ function applyDescribeImageTool(ctx, config) {
     name: VISION_SECTION,
     order: 119,
     text:
-      "Use the describe_image tool to let this text-only model 'see' an image. Pass an image URL, a local file path, or a DSH attachment sha256 reference (a bare 64-hex digest such as c2872d81dd03f094713cca90eba7b0b2ab834e27599b6a7016d7cb124e268402 — the form the attachment picker hands to the model) plus a question or description instruction. " +
+      "Use the describe_image tool to let this text-only model 'see' an image. Pass an image URL, a local file path, or a DSH attachment digest reference plus a question or description instruction. " +
+      "A digest reference is hex characters (optionally `sha256:`-prefixed): the full 64-character sha256, or just the 8+ character fragment that appears in a placeholder like `[image omitted because this model accepts text only; attachment sha256:c2872d81]` — that placeholder means the user attached an image you cannot see directly; pass its fragment (e.g. c2872d81) as the image argument. " +
       "The tool routes the image to a vision-capable backend and returns its text answer, which you should treat as if you had looked at the image yourself. " +
       "Use it whenever the user references an image, screenshot, diagram, chart, or any visual content. Ask specific questions (e.g. 'What text is in this screenshot?', 'Describe this UI layout') for best results."
   });
   ctx.tools.register(defineTool({
     name: "describe_image",
     description:
-      "Give this text-only model vision by routing an image to a multimodal backend and returning its text answer. Accepts an image URL, a local file path, or a DSH attachment sha256 reference (bare 64-hex digest, e.g. c2872d81dd03f094713cca90eba7b0b2ab834e27599b6a7016d7cb124e268402 — read and embedded automatically) plus a prompt describing what to extract. Use it to read screenshots, diagrams, charts, OCR document text, or answer visual questions. This is the model's 'eyes'.",
+      "Give this text-only model vision by routing an image to a multimodal backend and returning its text answer. Accepts an image URL, a local file path, or a DSH attachment digest (full 64-hex sha256, or the 8+ hex-character fragment from an `[image omitted … attachment sha256:xxxxxxxx]` placeholder — resolved automatically) plus a prompt describing what to extract. Use it to read screenshots, diagrams, charts, OCR document text, or answer visual questions. This is the model's 'eyes'.",
     parameters: {
-      image: { type: "string", required: true, description: "Image URL (http/https), a local file path, or a DSH attachment sha256 reference (64-hex digest) to read and embed." },
+      image: { type: "string", required: true, description: "Image URL (http/https), a local file path, or a DSH attachment digest — full 64-hex sha256 or the shorter fragment shown in an `[image omitted … attachment sha256:…]` placeholder." },
       prompt: { type: "string", required: true, description: "What to ask about the image, e.g. 'Transcribe all text', 'Describe this diagram', 'What color is the button?'." },
       detail: { type: "string", enum: DETAIL_LEVELS, description: "Vision detail level: 'low' (cheaper, faster), 'high' (more tokens, finer detail), or 'auto' (backend default)." }
     },
@@ -430,6 +488,80 @@ function applyDescribeImageTool(ctx, config) {
 /** The harness's own image tool, hidden unless the routed model is confirmed vision-capable. */
 const NATIVE_IMAGE_TOOL = "read_image";
 
+// ---------------------------------------------------------------------------
+// Admission bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Property stamped on the shared llm runtime once the admission bridge is
+ * installed, so a plugin reload can never double-wrap the method.
+ */
+const BRIDGE_FLAG = "__toolVisionAdmissionBridge";
+
+/**
+ * The ORIGINAL (unpatched) LlmRuntime#resolveModelInfo, captured when the
+ * bridge is installed. Capability gating must consult TRUE modalities — the
+ * patched public method deliberately reports `image` for text-only models so
+ * the host prompt gate admits attachments, and that lie must not leak into
+ * describe_image/read_image masking decisions.
+ * @type {null | Function}
+ */
+let nativeResolveModelInfo = null;
+
+/**
+ * Resolve the actual LlmRuntime instance out of whatever the cordis inject
+ * callback handed us. `ctx.inject(["llm"], cb)` runs `cb(ctx, config)` — the
+ * argument is a CONTEXT (it exposes `.on`/`.get`, and the service through
+ * `get("llm")`), NOT the runtime itself, so the bridge must unwrap it or the
+ * wrap silently no-ops.
+ */
+function llmServiceFrom(injected) {
+  if (injected === void 0 || injected === null) return void 0;
+  if (typeof injected.get === "function") {
+    const service = injected.get("llm");
+    if (service !== void 0 && service !== null) return service;
+  }
+  if (typeof injected.resolveModelInfo === "function") return injected;
+  return injected.llm;
+}
+
+/**
+ * Wrap the llm runtime's PUBLIC resolveModelInfo so every consumer of that
+ * method — most importantly the host api-proxy prompt gate — sees text-only
+ * models as image-capable. Internal dispatch resolves modalities through the
+ * private resolveModelInfoFor path and stays truthful, so dsh-llm still
+ * projects attached images into `[image omitted … attachment sha256:<8-hex>]`
+ * placeholders instead of sending pixels to a text-only endpoint.
+ * @returns whether the bridge was installed on this call.
+ */
+function installAdmissionBridge(llm, logger) {
+  if (llm === void 0 || llm === null || llm[BRIDGE_FLAG] === true) return false;
+  const original = llm.resolveModelInfo;
+  if (typeof original !== "function") {
+    logger?.warn?.("tool-vision: admission bridge skipped — resolved llm service has no resolveModelInfo method");
+    return false;
+  }
+  llm[BRIDGE_FLAG] = true;
+  nativeResolveModelInfo = original;
+  llm.resolveModelInfo = async function (provider, model, signal) {
+    const info = await original.call(this, provider, model, signal);
+    if (info !== void 0 && info !== null && info.inputModalities !== void 0 && !info.inputModalities.includes("image")) {
+      return { ...info, inputModalities: [...info.inputModalities, "image"] };
+    }
+    return info;
+  };
+  logger?.info?.("tool-vision: admission bridge installed — text-only models now admit image attachments");
+  return true;
+}
+
+/** True modalities for one route, bypassing the admission bridge's patch. */
+async function resolveNativeModelInfo(llm, provider, model, signal) {
+  if (nativeResolveModelInfo !== null) {
+    return nativeResolveModelInfo.call(llm, provider, model, signal);
+  }
+  return llm.resolveModelInfo(provider, model, signal);
+}
+
 /**
  * Resolve the routed model's image capability for one prompt assembly.
  *   - `true`      -> the model declares "image" input
@@ -439,7 +571,8 @@ const NATIVE_IMAGE_TOOL = "read_image";
  *                    with no agent/provider/model): the catalog is left alone
  *
  * Only a POSITIVE "image" declaration keeps `read_image` visible; every other
- * outcome hides it and keeps `describe_image`.
+ * outcome hides it and keeps `describe_image`. Deliberately consults the
+ * NATIVE resolveModelInfo (see installAdmissionBridge).
  */
 async function resolveModelHasImage(ctx, context) {
   const agent = context.agent;
@@ -451,7 +584,7 @@ async function resolveModelHasImage(ctx, context) {
   if (typeof provider !== "string" || typeof model !== "string") return void 0;
   let info;
   try {
-    info = await llm.resolveModelInfo(provider, model, context.signal);
+    info = await resolveNativeModelInfo(llm, provider, model, context.signal);
   } catch (error) {
     ctx.logger?.warn?.(`tool-vision: could not resolve image capability for model "${model}"; treating it as non-vision and hiding read_image: ${error?.message ?? String(error)}`);
     return false;
@@ -486,6 +619,7 @@ function apply(ctx, config) {
   }
   applyDescribeImageTool(ctx, config);
   ctx.inject(["llm"], (llmCtx) => {
+    if (config.bridgeAttachments) installAdmissionBridge(llmServiceFrom(llmCtx), llmCtx.logger);
     // Prompt-assembly capability mask. Runs around the `system-prompt/assemble`
     // waterfall so the FINAL tool schemas the loop sends to the model are
     // masked: a vision model loses `describe_image` (and its guidance

@@ -37,16 +37,38 @@ and performs steps 1–2 on the model's behalf.
 | --- | --- | --- |
 | http(s) URL | `https://example.com/pic.png` | Fetched, then base64-embedded |
 | Local file path | `C:\shots\ui.png` | Read, then base64-embedded |
-| DSH attachment sha256 ref | `c2872d81dd03f094713cca90eba7b0b2ab834e27599b6a7016d7cb124e268402` (or `sha256:`-prefixed) | Resolved against the local attachment store, then base64-embedded |
+| DSH attachment digest | `c2872d81dd03f094713cca90eba7b0b2ab834e27599b6a7016d7cb124e268402` (or a unique **8+ hex-char prefix**, optionally `sha256:`-prefixed) | Resolved against the local attachment store, then base64-embedded |
 
-The **sha256 form** is what the Web GUI's attachment picker hands to the model
-when the user drops an image onto the chat. The plugin maps the digest to the
-content-addressed object at
-`$DSH_HOME/attachments/v1/objects/<first-2-hex>/<full-sha256>`, reads the bytes,
+The **digest form** covers both the full sha256 reference and the short
+fragment left behind by DSH's built-in text-only image projection
+(`[image omitted … attachment sha256:c2872d81]`). The plugin maps the digest to
+the content-addressed object at
+`$DSH_HOME/attachments/v1/objects/<first-2-hex>/<full-sha256>` (prefixes are
+resolved by scanning that store; an ambiguous prefix is reported back with an
+actionable error), reads the bytes,
 **sniffs the real MIME type from the file header** (the object has no
 extension), and embeds the image exactly like a normal path. A digest with no
 matching object raises an actionable error naming the store path, so the model
 can tell the user the image is unavailable on this machine.
+
+## Attached images on a text-only model (admission bridge)
+
+By default (`bridgeAttachments: true`) the plugin also patches the llm
+runtime's **public** `resolveModelInfo` so text-only models report `image`
+input. That is the exact check the host prompt gate performs before admitting a
+message carrying an image part — without the patch the Web GUI rejects the
+prompt with “当前模型不支持图片” / `MODEL_DOES_NOT_SUPPORT_IMAGES`.
+
+What this does **not** do is feed pixels to the text model. Model dispatch
+resolves modalities through an internal path that stays truthful, so dsh-llm's
+own projection replaces each attached image with the stable placeholder
+`[image omitted … attachment sha256:<first-8-hex>]`. The model sees that
+placeholder in its context, passes the fragment to `describe_image`, and the
+vision backend describes the real bytes. Set `bridgeAttachments: false` to
+restore the strict rejection behavior.
+
+Note: subagent sessions have their own separate gate
+(`SUBAGENT_IMAGE_UNSUPPORTED`, “子智能体会议暂不支持图片”), which this bridge does not lift.
 
 ## Capability gating
 
@@ -102,6 +124,7 @@ URIs, so the backend does not need filesystem access to your machine.
 | `imageFormat` | `openai` | Multimodal request shape. `openai` emits an `image_url` content block; `anthropic` emits an `image` content block whose `source` carries `base64` (`media_type`+`data`) for local files or `url` for URLs (the Claude-style schema). |
 | `timeoutMs` | `120000` | Cooperative tool-call budget. |
 | `maxOutputChars` | `200000` | Cap on returned text. |
+| `bridgeAttachments` | `true` | Admission bridge: patch the public `resolveModelInfo` so text-only models admit image attachments (see above). |
 
 ### Request body shapes
 
@@ -166,8 +189,15 @@ Copy-Item "$src\lib\index.js" "$dst\lib\index.js" -Force
 node "D:\git\deepseek-tools\dsh-tool-vision\smoke-test.mjs"
 node "D:\git\deepseek-tools\dsh-tool-vision\local-path-test.mjs"
 node "D:\git\deepseek-tools\dsh-tool-vision\sha256-ref-test.mjs"
+node "D:\git\deepseek-tools\dsh-tool-vision\admission-bridge-test.mjs"
 node "D:\npm\node_global\node_modules\@deepseek-ai\dsh\lib\bin.js" --profile web --dump-config
 ```
+
+`admission-bridge-test.mjs` proves the admission bridge patches the public
+`resolveModelInfo` (text-only model then declares `image`, so the host prompt
+gate admits attachments), that installing twice never double-wraps, that
+8+ hex digest prefixes resolve against an isolated attachment store, and that
+ambiguous/missing prefixes fail with actionable errors.
 
 `sha256-ref-test.mjs` creates an isolated `$DSH_HOME` under the OS temp dir and
 proves the sha256 form resolves against the real store layout (`attachments/v1/
