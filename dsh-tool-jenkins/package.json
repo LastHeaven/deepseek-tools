@@ -1,0 +1,20 @@
+{
+  "name": "@deepseek-ai/dsh-tool-jenkins",
+  "description": "Model-facing Jenkins CI tools (list jobs, job details, build status, console output, trigger build, queue status, nodes) as a native Cordis plugin calling the Jenkins REST API directly",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}
