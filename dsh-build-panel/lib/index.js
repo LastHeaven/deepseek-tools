@@ -13,13 +13,22 @@
 //     index → read plan → implement → archive) exactly like the opencode
 //     command did. This one is intentionally logged: it changes what the
 //     agent does and belongs in the audit trail.
+//   - commit plane (`/build <id> commit`): the same drive plane, but the
+//     instruction body comes from this package's own command file (`commit.md`,
+//     shipped beside this module) instead of a fixed string. The template's
+//     frontmatter is stripped and `$1` is bound to the task id, so the model
+//     runs the commit workflow (diff → review → commit) for that task. The body
+//     is sent verbatim — it already reads as plain instructions, telling the
+//     model which git commands to run — so the host adds no preamble and never
+//     places a filesystem path in the prompt.
 //
 // Both planes run against the session's real working directory via node:fs
 // (the host process, not the sandbox).
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import { readdir, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Cordis plugin name used by loader diagnostics. */
 const name = "build-panel";
@@ -48,6 +57,58 @@ function workflowInstruction(id, extra) {
 3. 将 docs/${id}/plan.md 内容剪切到 docs/${id}/plans/<时间戳>.md 并清空 plan.md（确保 plans/ 目录存在）。
 
 若有需求或设计不清楚的地方，直接问用户。`;
+}
+
+/**
+ * The commit command file shipped inside this package (`<pkg>/commit.md`).
+ * Resolved relative to this module so the code location is irrelevant.
+ */
+const COMMIT_TEMPLATE = join(dirname(fileURLToPath(import.meta.url)), "..", "commit.md");
+
+/**
+ * Drop a leading `---` frontmatter block (the opencode command header) while
+ * leaving the body's own thematic breaks untouched.
+ */
+function stripFrontmatter(text) {
+  const match = /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/u.exec(text);
+  return match === null ? text : text.slice(match[0].length);
+}
+
+/**
+ * Bind the template's `$1` placeholder to the task id. A literal split/join
+ * rather than `String.replace`, whose `$&`/`$1` replacement patterns would
+ * corrupt a template that legitimately contains such text.
+ */
+function bindPlaceholder(text, id) {
+  return text.split("$1").join(id);
+}
+
+/**
+ * Read the bundled command file, failing loud so the panel can show why. The
+ * message names the file and its error code but never its absolute host path
+ * (node's own ENOENT text embeds that path, so it is not reused).
+ */
+async function readCommitTemplate() {
+  try {
+    return await readFile(COMMIT_TEMPLATE, "utf8");
+  } catch (error) {
+    const code = error?.code ?? (error instanceof Error ? error.name : "UNKNOWN");
+    throw new Error(`无法读取插件内置的 commit.md（${code}）`);
+  }
+}
+
+/**
+ * Build the commit-plane instruction for one task: the bundled commit workflow
+ * with its frontmatter dropped and `$1` bound to the task id. The body is sent
+ * verbatim — it already reads as plain instructions, naming the git commands to
+ * run — so no host-written preamble is prepended and, in particular, no host
+ * filesystem path ever reaches the prompt.
+ */
+async function loadCommitInstruction(id) {
+  const raw = await readCommitTemplate();
+  const body = stripFrontmatter(raw);
+  if (body.trim() === "") throw new Error("插件内置的 commit.md 内容为空");
+  return bindPlaceholder(body, id).trim();
 }
 
 async function exists(path) {
@@ -214,8 +275,8 @@ function apply(ctx) {
   new BuildPanelService(ctx);
   ctx.commands.register({
     name: "build",
-    description: "执行 docs/<任务号> 构建工作流（浏览请用侧边栏 Build 面板）",
-    input: { hint: "<任务号> run [补充说明]" },
+    description: "执行 docs/<任务号> 构建工作流，或用 commit 命令文件提交（浏览请用侧边栏 Build 面板）",
+    input: { hint: "<任务号> run [补充说明] | <任务号> commit" },
     handler: async (invocation) => {
       const cwd = invocation.agent.session.header.cwd;
       if (cwd === void 0 || cwd === "") return { kind: "error", text: "当前会话缺少工作目录 cwd" };
@@ -223,19 +284,36 @@ function apply(ctx) {
       const parts = raw.split(/\s+/u);
       const id = parts[0];
       const sub = parts.slice(1).join(" ").trim();
+      /** Queue one model-visible instruction and report the plane's JSON result. */
+      const drive = (type, text) => {
+        try {
+          invocation.agent.followup(createUserMessage({
+            content: [{ type: "text", text }],
+            source: { kind: "user" }
+          }));
+          return { kind: "success", text: JSON.stringify({ type, id, ok: true }) };
+        } catch (error) {
+          return { kind: "error", text: error instanceof Error ? error.message : String(error) };
+        }
+      };
+      if (id !== "" && sub === "commit") {
+        // commit plane: the instruction body comes from the plugin's bundled
+        // commit.md, so a read failure is reported instead of queueing an
+        // empty run.
+        let text;
+        try {
+          text = await loadCommitInstruction(id);
+        } catch (error) {
+          return { kind: "error", text: error instanceof Error ? error.message : String(error) };
+        }
+        return drive("commit", text);
+      }
       if (id === "" || !(sub === "run" || sub.startsWith("run "))) {
-        return { kind: "error", text: '用法：/build <任务号> run [补充说明]；浏览任务请打开侧边栏 Build 面板' };
+        const usage = '用法：/build <任务号> run [补充说明]，或 /build <任务号> commit；浏览任务请打开侧边栏 Build 面板';
+        return { kind: "error", text: usage };
       }
       const extra = sub.slice(3).trim();
-      try {
-        invocation.agent.followup(createUserMessage({
-          content: [{ type: "text", text: workflowInstruction(id, extra) }],
-          source: { kind: "user" }
-        }));
-        return { kind: "success", text: JSON.stringify({ type: "run", id, ok: true }) };
-      } catch (error) {
-        return { kind: "error", text: error instanceof Error ? error.message : String(error) };
-      }
+      return drive("run", workflowInstruction(id, extra));
     }
   });
 }
