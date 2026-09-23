@@ -1,0 +1,18 @@
+{
+  "name": "@deepseek-ai/dsh-tool-tourmind",
+  "description": "Model-facing TourMind hotel booking tools (location, hotel search, room rates, availability, booking, orders, payment) as a native Cordis plugin over the TourMind Skill REST API",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib/index.js"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}

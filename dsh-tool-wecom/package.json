@@ -1,0 +1,20 @@
+{
+  "name": "@deepseek-ai/dsh-tool-wecom",
+  "description": "Model-facing WeCom (企业微信) tools for the official wecom-cli: run discovery-driven service methods, read method schemas, and manage authorization, as a native Cordis plugin spawning the local CLI over the subprocess seam",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}
