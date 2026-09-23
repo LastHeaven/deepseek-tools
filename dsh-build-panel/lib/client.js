@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
 		// ------------------------------------------------------------------
 		// styles
 		// ------------------------------------------------------------------
-		const css = `.bp_card{position:fixed;z-index:50;border:1px solid var(--dsw-alias-border-inverted);background:var(--dsw-specific-menu);width:420px;max-width:calc(100vw - 24px);max-height:60vh;box-shadow:var(--dsw-shadow-lv3);border-radius:12px;flex-direction:column;display:flex;overflow:hidden}.bp_header{box-sizing:border-box;flex:none;justify-content:space-between;align-items:center;min-height:44px;padding:10px 12px;display:flex}.bp_title{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:500;line-height:20px}.bp_body{flex:1;min-height:0;padding:0 12px 12px;overflow-y:auto;display:flex;flex-direction:column;gap:8px}.bp_badge{width:100%;height:42px;color:var(--dsw-alias-label-primary);cursor:pointer;background:0 0;border:none;border-radius:12px;align-items:center;gap:8px;padding:0 10px 0 8px;font-family:inherit;font-size:14px;display:inline-flex;overflow:hidden}.bp_badge:hover{background:var(--dsw-alias-interactive-bg-hover)}.bp_badge:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}.bp_badgeLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.bp_badgeMeta{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;flex:none;margin-left:auto;font-size:12px;line-height:16px}.bp_row{border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:6px}.bp_rowHead{display:flex;align-items:center;gap:8px}.bp_rowName{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500}.bp_rowMeta{color:var(--dsw-alias-label-tertiary);font-size:12px}.bp_pre{background:var(--dsw-alias-markdown-code-block);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;margin:0;padding:8px;max-height:180px;overflow:auto;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-all}.bp_note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;margin:4px 0}.bp_err{color:var(--dsw-alias-state-error-primary);font-size:12px}.bp_actions{display:flex;gap:8px;margin-top:2px}.bp_btn{cursor:pointer;border:1px solid var(--dsw-alias-border-inverted);background:0 0;color:var(--dsw-alias-label-primary);border-radius:8px;padding:5px 12px;font-family:inherit;font-size:13px}.bp_btn:hover{background:var(--dsw-alias-interactive-bg-hover)}.bp_btnPrimary{background:var(--dsw-alias-interactive-bg-hover);font-weight:500}.bp_section{color:var(--dsw-alias-label-caption);text-transform:uppercase;font-size:11px;letter-spacing:.04em;margin:4px 0 0}.bp_pager{flex:none;align-items:center;justify-content:space-between;gap:8px;margin-top:2px;display:flex}.bp_pagerInfo{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;font-size:12px;line-height:16px;text-align:center;min-width:0}`;
+		const css = `.bp_card{position:fixed;z-index:50;border:1px solid var(--dsw-alias-border-inverted);background:var(--dsw-specific-menu);width:420px;max-width:calc(100vw - 24px);max-height:60vh;box-shadow:var(--dsw-shadow-lv3);border-radius:12px;flex-direction:column;display:flex;overflow:hidden}.bp_header{box-sizing:border-box;flex:none;justify-content:space-between;align-items:center;min-height:44px;padding:10px 12px;display:flex}.bp_title{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:500;line-height:20px}.bp_body{flex:1;min-height:0;padding:0 12px 12px;overflow-y:auto;display:flex;flex-direction:column;gap:8px}.bp_badge{width:100%;height:42px;color:var(--dsw-alias-label-primary);cursor:pointer;background:0 0;border:none;border-radius:12px;align-items:center;gap:8px;padding:0 10px 0 8px;font-family:inherit;font-size:14px;display:inline-flex;overflow:hidden}.bp_badge:hover{background:var(--dsw-alias-interactive-bg-hover)}.bp_badge:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}.bp_badgeLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.bp_badgeMeta{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;flex:none;margin-left:auto;font-size:12px;line-height:16px}.bp_row{border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:6px}.bp_rowHead{display:flex;align-items:center;gap:8px}.bp_rowName{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500}.bp_rowMeta{color:var(--dsw-alias-label-tertiary);font-size:12px}.bp_pre{background:var(--dsw-alias-markdown-code-block);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;margin:0;padding:8px;max-height:180px;overflow:auto;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-all}.bp_note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;margin:4px 0}.bp_err{color:var(--dsw-alias-state-error-primary);font-size:12px}.bp_actions{display:flex;gap:8px;margin-top:2px}.bp_btnPush{margin-left:auto}.bp_btn{cursor:pointer;border:1px solid var(--dsw-alias-border-inverted);background:0 0;color:var(--dsw-alias-label-primary);border-radius:8px;padding:5px 12px;font-family:inherit;font-size:13px}.bp_btn:hover{background:var(--dsw-alias-interactive-bg-hover)}.bp_btnPrimary{background:var(--dsw-alias-interactive-bg-hover);font-weight:500}.bp_section{color:var(--dsw-alias-label-caption);text-transform:uppercase;font-size:11px;letter-spacing:.04em;margin:4px 0 0}.bp_pager{flex:none;align-items:center;justify-content:space-between;gap:8px;margin-top:2px;display:flex}.bp_pagerInfo{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;font-size:12px;line-height:16px;text-align:center;min-width:0}`;
 		const tagId = "@deepseek-ai/dsh-build-panel/style.css";
 		/** Tasks shown per page in the list view. */
 		const PAGE_SIZE = 6;
@@ -23,6 +23,16 @@ window.__ModuleLoader__.load({
 
 		function el(type, props, ...children) {
 			return react.createElement(type, props, ...children);
+		}
+
+		/**
+		 * Read the Session the main view currently owns from the session-list
+		 * snapshot. `SessionListState` carries the catalog rows in `byId`; the
+		 * active Session is the one retained by `mainView`, which is the same
+		 * idiom ui-sidebar, ui-layout, and ui-cordis use.
+		 */
+		function currentSessionId(state) {
+			return Object.values(state?.byId ?? {}).find((session) => (session.retainedBy?.mainView ?? 0) > 0)?.id;
 		}
 
 		/** Relative age of a plan.mtime in ms: 刚刚 / N 分钟前 / … . */
@@ -184,7 +194,7 @@ window.__ModuleLoader__.load({
 						detail.data.archiveTail && el("pre", { className: "bp_pre" }, detail.data.archiveTail),
 						el("div", { className: "bp_actions" },
 							el("button", { type: "button", className: "bp_btn", onClick: () => setDetail(null) }, "返回列表"),
-							el("button", { type: "button", className: "bp_btn bp_btnPrimary", onClick: () => runTask(detail.id) }, "执行此任务"),
+							el("button", { type: "button", className: "bp_btn bp_btnPush bp_btnPrimary", onClick: () => runTask(detail.id) }, "执行此任务"),
 							el("button", {
 								type: "button",
 								className: "bp_btn",
@@ -274,7 +284,7 @@ window.__ModuleLoader__.load({
 		 * standard slot prop delivering the current session id.
 		 */
 		function BuildPanelAction({ useSessions, remote }) {
-			const current = useSessions((s) => s.current);
+			const current = useSessions(currentSessionId);
 			const [open, setOpen] = react.useState(false);
 
 			if (current === void 0) {

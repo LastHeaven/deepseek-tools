@@ -232,25 +232,38 @@ const r = slotRegistrations[0];
 console.log("slot name:", r.opts.name, "| id:", r.opts.id);
 
 // --- render the registered component with a fake useSessions ----------
-let tree = react.render(r.component({
-  useSessions: (sel) => sel({ current: "session-abc" }),
-  remote
-}));
-const badge = find(tree, buttonNamed("Build 工作流"));
-if (badge === null) throw new Error("panel badge not rendered");
-console.log("badge rendered:", textOf(badge).trim());
+// The real hook selects from the Client `SessionListState` snapshot; the
+// fixture mirrors that shape, with the active row retained by `mainView`.
+const sessionListState = {
+  ids: ["session-abc"],
+  byId: { "session-abc": { id: "session-abc", displayTitle: "abc", running: false, blank: false, updatedAt: 0, retainedBy: { mainView: 1 } } },
+  phase: "ready",
+  projectionsBySession: {}
+};
+const useSessions = (sel) => sel(sessionListState);
+let tree = react.render(r.component({ useSessions, remote }));
+const findBadge = (node) => find(node, (n) => n.type === "button" && textOf(n).trim().startsWith("Build 工作流"));
+const hit = findBadge(tree);
+if (hit === null) throw new Error("panel badge not rendered");
+// The badge must be the ENABLED variant: a stale selector (the removed
+// `SessionListState.current`) silently degrades it to a disabled "无会话"
+// badge with no session, so assert on the resolved session rather than the
+// label alone.
+if (hit.props.disabled === true) throw new Error("panel saw no current session — useSessions selector is stale: " + textOf(hit).trim());
+console.log("badge rendered:", textOf(hit).trim());
 
 /** Re-render until the async browse promises settle. */
 async function settle(rounds = 5) {
   for (let i = 0; i < rounds; i++) {
     await new Promise((resolve) => setTimeout(resolve, 0));
     react.clearDirty();
-    tree = react.render(r.component({
-      useSessions: (sel) => sel({ current: "session-abc" }),
-      remote
-    }));
+    tree = react.render(r.component({ useSessions, remote }));
   }
 }
+
+// The open/close toggle lives on the fresh render of each pass, so read the
+// click handler from the node just asserted.
+const badge = findBadge(tree);
 
 // 1. open the panel and wait for the task list
 badge.props.onClick();
