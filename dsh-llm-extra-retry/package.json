@@ -1,0 +1,25 @@
+{
+  "name": "@local/dsh-llm-extra-retry",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Retries model requests that fail with a transient process-level error the shipped retry policy does not cover, such as the pi-ai `PI_AI_ERROR` \"stream read error: unexpected EOF\" truncation.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

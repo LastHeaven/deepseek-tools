@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Extra Model Retry",
+    "description": "Automatically retries a failed model request when the provider reports a transient truncation such as \"stream read error: unexpected EOF\", instead of ending the run."
+  }
+}

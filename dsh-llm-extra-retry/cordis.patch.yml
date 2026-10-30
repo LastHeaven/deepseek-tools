@@ -1,0 +1,44 @@
+# Extra model-request retry for DSH.
+#
+# `@deepseek-ai/dsh-llm-retry` retries failed model requests only for the codes
+# a provider `retryPolicy` declares. The pi-ai adapter reports a truncated SSE
+# body as the catch-all `PI_AI_ERROR`, which is NOT in the shipped retryable
+# set (`EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`), so a
+# run ends with "本路运行失败 stream read error: unexpected EOF" instead of
+# simply trying again.
+#
+# This row mounts `@local/dsh-llm-extra-retry`, one more listener on the agent
+# loop's `agent/request-error` waterfall. It retries an eligible failure after
+# a bounded, jittered, cancellable backoff, and leaves every other failure
+# (auth, quota, invalid request, context overflow, an unsupported pi-ai
+# `deferred` response) to the loop exactly as before. It asks the downstream
+# chain first, so a mounted `dsh-llm-retry` keeps precedence for its own codes.
+#
+# Tune it here; every field is optional and falls back to the defaults below.
+# `codes` matches the provider-neutral failure code, `messagePatterns` are
+# case-insensitive substrings of the failure message. Set
+# `messagePatterns: []` to retry every failure of an eligible code.
+- insert:
+    - id: llm-extra-retry
+      name: '@local/dsh-llm-extra-retry'
+      config:
+        enabled: true
+        codes:
+          - PI_AI_ERROR
+        messagePatterns:
+          - unexpected eof
+          - stream read error
+          - eof
+          - connection reset
+          - econnreset
+          - socket hang up
+          - other side closed
+          - http2 request did not get a response
+          - premature close
+          - stream ended
+          - terminated
+        maxRetries: 4
+        initialDelayMs: 1500
+        maxDelayMs: 30000
+        jitterRatio: 0.2
+        logRetries: true

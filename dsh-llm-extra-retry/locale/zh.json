@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "模型请求额外重试",
+    "description": "当服务端返回 “stream read error: unexpected EOF” 这类可恢复的流截断错误时自动重试该次模型请求，而不是直接结束本轮运行。"
+  }
+}
