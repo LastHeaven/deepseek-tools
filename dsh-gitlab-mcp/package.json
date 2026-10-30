@@ -1,0 +1,22 @@
+{
+  "name": "@local/dsh-gitlab",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "GitLab bundle: the @deepseek-ai/dsh-gitlab-agent preset mounting the native @local/dsh-tool-gitlab REST plugin for http://192.168.2.204 (fine-grained PAT via the GITLAB_TOKEN credential).",
+  "exports": {
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

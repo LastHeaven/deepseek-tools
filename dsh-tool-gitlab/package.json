@@ -1,0 +1,20 @@
+{
+  "name": "@local/dsh-tool-gitlab",
+  "description": "Model-facing GitLab tools (project/repo/issue read, issue & note create/update, uploads, project-scoped search) as a native Cordis plugin calling the GitLab REST API directly with a fine-grained PAT",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}

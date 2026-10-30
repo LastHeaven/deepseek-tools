@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "GitLab",
+    "description": "Connects the GitLab instance at http://192.168.2.204 to an Agent through a native REST plugin, so the model can read projects, repository files, branches, commits, issues, labels and milestones, write issues and comments, and upload attachments."
+  }
+}
