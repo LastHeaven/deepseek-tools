@@ -1,22 +1,25 @@
-// @local/dsh-tool-gitlab
+// @deepseek-ai/dsh-tool-gitlab
 //
-// Native Cordis tool plugin exposing GitLab tools against a self-hosted GitLab
-// instance's REST API, authenticated with a *fine-grained* personal access
-// token. This is the in-process replacement for the `mcp-gitlab` MCP client
-// entry (which needed an OAuth `mcp`-scope token and a stdio bridge): the tools
-// are registered directly through the `tools` registry, no child process and no
-// JSON-RPC layer are involved.
+// Native Cordis tool plugin exposing GitLab tools against ANY GitLab instance's
+// REST API, authenticated with a *fine-grained* personal access token. It is
+// deployment-neutral: no instance address, token, or local path is baked in.
+// `apiUrl` is a REQUIRED config field, so a deployment that forgets to point
+// the plugin at its own GitLab fails loudly instead of silently querying
+// whatever instance the source happened to be developed against.
 //
-// Target instance: http://192.168.2.204 (GitLab with granular-scope PATs).
+// Install it as a bundle (`dsh plugin --profile <name> add <path-or-package>`);
+// the bundled cordis.patch.yml mounts one `tool-gitlab` row with a placeholder
+// `apiUrl` that must be replaced with the real API root.
 //
-// ┌── WHY SOME TOOLS ARE MISSING ────────────────────────────────────────────┐
-// │ The token this plugin ships for carries only a SUBSET of granular scopes. │
-// │ Everything registered here was verified against the live instance.       │
-// │ Merge requests, pipelines, tags, releases, wikis, users/groups/members,  │
-// │ global search, branch/commit/file WRITES and label writes all answer     │
-// │ 403 insufficient_granular_scope with this token, so no tool is          │
-// │ registered for them: a tool that always fails is worse than no tool.     │
-// │ See README.md for the measured matrix and the scopes to add.             │
+// ┌── SCOPE COVERAGE DEPENDS ON THE TOKEN ────────────────────────────────────┐
+// │ Every registered tool was verified against a real instance with a         │
+// │ fine-grained PAT, and each one degrades with a readable message rather    │
+// │ than a bare status code. Merge requests, pipelines, tags, releases,      │
+// │ wikis, users/groups/members, global search, branch/commit/file WRITES    │
+// │ and label writes need scopes the reference token did not carry — they    │
+// │ were therefore left OUT of this suite: a tool that can only ever answer  │
+// │ 403 is worse than no tool. See README.md for the matrix and the scopes   │
+// │ to grant when you want one of them added.                                │
 // └──────────────────────────────────────────────────────────────────────────┘
 //
 // REST endpoints used (base url has no trailing slash):
@@ -54,12 +57,17 @@ const DEFAULT_TIMEOUT_MS = 60000;
 const DEFAULT_TOKEN_ENV = "GITLAB_TOKEN";
 
 /**
- * API root used when config omits `apiUrl` (the workspace's private GitLab).
+ * API root the old bundled patch used as a placeholder.
  *
- * It MUST include the `/api/v4` prefix: the instance serves the web UI from the
- * bare origin, so `http://host/projects/1` answers 404 HTML. Verified.
+ * There is deliberately NO runtime default: `apiUrl` is required, so an
+ * unconfigured deployment cannot silently talk to someone else's GitLab. This
+ * constant is exported only so the bundled `cordis.patch.yml` and the smoke
+ * test agree on the exact placeholder to replace.
+ *
+ * It MUST include the `/api/v4` prefix, because GitLab serves its web UI from
+ * the bare origin — `http://host/projects/1` answers 404 HTML. Verified.
  */
-const DEFAULT_API_URL = "http://192.168.2.204/api/v4";
+const API_URL_PLACEHOLDER = "https://gitlab.example.com/api/v4";
 
 /** Hard cap on tool output (characters). */
 const DEFAULT_MAX_OUTPUT_CHARS = 200000;
@@ -68,12 +76,12 @@ const DEFAULT_MAX_OUTPUT_CHARS = 200000;
 const SEARCH_SCOPES = ["blobs", "issues", "commits", "notes", "milestones", "wiki_blobs"];
 
 /**
- * Minimum usable search-term length, MEASURED against the live instance.
+ * Minimum usable search-term length, MEASURED against GitLab's basic
+ * (Postgres) search backend, which is what a default GitLab instance runs.
  *
- * This instance runs GitLab's basic (Postgres) search, not Elasticsearch, and
- * it silently DROPS terms below the minimum instead of erroring — a query of
- * `酒店` returns HTTP 200 with an empty list, which reads as "no such issue"
- * when the opposite is true (`酒店预` returns 20). Measured on cx/trip:
+ * That backend silently DROPS terms below the minimum instead of erroring — a
+ * query of `酒店` returns HTTP 200 with an empty list, which reads as "no such
+ * issue" when the opposite is true (`酒店预` returns 20). Measured:
  *
  *   "酒"     -> 0    "酒店"   -> 0    "酒店预" -> 20   "酒店预订" -> 20
  *   "h"      -> 0    "ho"     -> 20   "hot"   -> 20   "hotel"    -> 20
@@ -81,6 +89,10 @@ const SEARCH_SCOPES = ["blobs", "issues", "commits", "notes", "milestones", "wik
  * So a CJK term needs at least 3 characters and an ASCII term at least 2. Both
  * bounds are flagged BEFORE the request, and a zero-result answer repeats the
  * caveat — the failure mode is invisible otherwise.
+ *
+ * An instance that runs Elasticsearch (GitLab Advanced Search) does not need
+ * these rules; setting `searchRules: false` on the plugin config turns the
+ * warnings off without changing what the tools send.
  */
 const MIN_SEARCH_CHARS_CJK = 3;
 const MIN_SEARCH_CHARS_LATIN = 2;
@@ -95,13 +107,18 @@ function countChars(text) {
 /**
  * Explain why a search term is likely to match nothing, or "" when it is fine.
  *
- * Two independent traps are encoded, both measured on the live instance:
+ * Two independent traps are encoded, both measured against GitLab's basic
+ * (Postgres) search backend:
  *   1. a too-short term is dropped entirely (returns 0, not an error);
  *   2. a Latin word glued to CJK is not tokenized on its own, so looking up
  *      `webpack` misses the issue titled `manager-frontend项目webpack升级`
  *      while `webpack升` and `项目webpack` both hit it.
+ *
+ * `enabled` is false for instances on Elasticsearch (Advanced Search), which
+ * tolerate both terms up front: the warnings would then be noise on every call.
  */
-function describeSearchTermRisk(term) {
+function describeSearchTermRisk(term, enabled = true) {
+  if (!enabled) return "";
   const text = String(term ?? "").trim();
   if (!text) return "";
   const cjkCount = (text.match(CJK_PATTERN) ?? []).length;
@@ -109,7 +126,7 @@ function describeSearchTermRisk(term) {
   const notes = [];
   if (cjkCount > 0 && length < MIN_SEARCH_CHARS_CJK) {
     notes.push(
-      `"${text}" is ${length} character(s). This instance silently drops search terms shorter than ${MIN_SEARCH_CHARS_CJK} CJK characters, so it returns ZERO results even when matches exist — add characters (e.g. "酒店" -> "酒店预").`
+      `"${text}" is ${length} character(s). Basic GitLab search silently drops terms shorter than ${MIN_SEARCH_CHARS_CJK} CJK characters, so it returns ZERO results even when matches exist — add characters (e.g. "酒店" -> "酒店预").`
     );
   } else if (cjkCount === 0 && length < MIN_SEARCH_CHARS_LATIN) {
     notes.push(`"${text}" is shorter than the ${MIN_SEARCH_CHARS_LATIN}-character minimum for this search backend and will match nothing.`);
@@ -123,11 +140,12 @@ function describeSearchTermRisk(term) {
 }
 
 /** The caveat appended to an empty result set, so a tokenization miss is never read as "absent". */
-function emptyResultHint(term) {
+function emptyResultHint(term, enabled = true) {
+  if (!enabled) return "";
   const text = String(term ?? "").trim();
   return (
-    `\n\nNOTE: an empty result set from this instance often means the TERM was unusable, not that nothing matches. ` +
-    `Search rules measured here: CJK terms need >= ${MIN_SEARCH_CHARS_CJK} characters (2-char terms are silently dropped); ` +
+    `\n\nNOTE: an empty result set from basic GitLab search often means the TERM was unusable, not that nothing matches. ` +
+    `Search rules measured there: CJK terms need >= ${MIN_SEARCH_CHARS_CJK} characters (2-char terms are silently dropped); ` +
     `an ASCII word glued to CJK in the title is not tokenized alone (search "webpack升", not "webpack"). ` +
     `Retry "${text}" with a longer or more distinctive fragment before reporting that nothing exists.`
   );
@@ -135,12 +153,20 @@ function emptyResultHint(term) {
 
 /** Plugin config, resolved by the loader (schemastery defaults applied). */
 const Config = z.object({
-  apiUrl: z.string().default(DEFAULT_API_URL),
+  // REQUIRED on purpose: a plugin that picks its own instance would make a
+  // half-configured deployment query the wrong GitLab while looking healthy.
+  apiUrl: z
+    .string()
+    .required()
+    .description("GitLab API root including the /api/v4 prefix, e.g. https://gitlab.example.com/api/v4. Required."),
   // A literal token wins over the reference; leave it empty to keep the secret
   // out of configuration and let `tokenEnv` resolve it through the credential
   // store instead.
   apiToken: z.string().default(""),
   tokenEnv: z.string().default(DEFAULT_TOKEN_ENV),
+  // Basic (Postgres) search needs the short-term / glued-ASCII warnings; an
+  // Elasticsearch-backed instance does not. Set false there to silence them.
+  searchRules: z.boolean().default(true),
   getProject: z.boolean().default(true),
   listBranches: z.boolean().default(true),
   listCommits: z.boolean().default(true),
@@ -206,7 +232,16 @@ async function resolveToken(ctx, config) {
 // ---------------------------------------------------------------------------
 
 function baseUrl(config) {
-  const root = String(config.apiUrl || DEFAULT_API_URL).replace(/\/+$/, "");
+  const raw = String(config.apiUrl ?? "").trim();
+  // `apiUrl` is required by the schema, so this only fires when `apply` was
+  // called directly (a smoke test, or a hand-written composition that skipped
+  // the loader). Fail with the fix, not with a fetch to "undefined/...".
+  if (!raw) {
+    throw new Error(
+      "tool-gitlab: `apiUrl` is not configured. Set it to your GitLab API root, e.g. https://gitlab.example.com/api/v4 (the /api/v4 suffix is required)."
+    );
+  }
+  const root = raw.replace(/\/+$/, "");
   // Tolerate `apiUrl: http://host` (a plausible config mistake): every request
   // path below is written relative to the API root, so append it once here
   // rather than 404-ing against the web UI on the bare origin.
@@ -664,9 +699,9 @@ The free-text \`search\` filter needs >= ${MIN_SEARCH_CHARS_CJK} characters for 
       // genuinely means the project has no issues in that state.
       const body =
         issues.length === 0 && args.search
-          ? `${header}\n\n(no results)${emptyResultHint(args.search)}`
+          ? `${header}\n\n(no results)${emptyResultHint(args.search, config.searchRules)}`
           : fmtList(header, lines, { nextPage }, total);
-      const risk = args.search ? describeSearchTermRisk(args.search) : "";
+      const risk = args.search ? describeSearchTermRisk(args.search, config.searchRules) : "";
       return truncate(body + (risk ? `\n\nWARNING — ${risk}` : ""), config.maxOutputChars);
     },
     presentCall: (args) => ({ card: "generic", title: args.project, kind: "gitlab-issues", rawInput: args.labels || args.search || "" })
@@ -784,21 +819,33 @@ function applyListMilestonesTool(ctx, config) {
 }
 
 function applySearchProjectTool(ctx, config) {
-  ctx.tools.register(defineTool({
-    name: "gitlab_search_project",
-    description: `Keyword search scoped to ONE project (works on every project this token can see). Scopes: 'blobs' (file contents), 'issues' (issue title/description), 'notes' (issue comments), 'commits' (commit messages), 'milestones', 'wiki_blobs'. Results are limited to the first 6 matching lines of each blob.
+  // The basic-search traps only exist on a Postgres-backed instance; an
+  // Elasticsearch (Advanced Search) deployment must not be told about them, or
+  // the model spends the turn arguing with a rule that does not apply.
+  const rulesBlock = config.searchRules
+    ? `
 
-CRITICAL SEARCH-TERM RULES for this instance (basic search, not Elasticsearch). Violating them makes you report "not found" for things that DO exist:
+CRITICAL SEARCH-TERM RULES for basic GitLab search (Postgres, not Elasticsearch). Violating them makes you report "not found" for things that DO exist:
 - CJK terms need >= ${MIN_SEARCH_CHARS_CJK} characters. 1-2 character Chinese terms are SILENTLY DROPPED and return zero results with HTTP 200: "酒店" -> 0 results, "酒店预" -> 20 results.
 - ASCII terms need >= ${MIN_SEARCH_CHARS_LATIN} characters ("ho" works, "h" does not).
 - An ASCII word adjacent to CJK is not tokenized alone: "webpack" misses "manager-frontend项目webpack升级"; use "webpack升" or "项目webpack".
-- A zero-result answer is usually a bad TERM, not a missing issue. Retry with a longer fragment before concluding absence. The tool appends this reminder automatically when it returns nothing.
+- A zero-result answer is usually a bad TERM, not a missing issue. Retry with a longer fragment before concluding absence. The tool appends this reminder automatically when it returns nothing.`
+    : "";
+  ctx.tools.register(defineTool({
+    name: "gitlab_search_project",
+    description: `Keyword search scoped to ONE project (works on every project this token can see). Scopes: 'blobs' (file contents), 'issues' (issue title/description), 'notes' (issue comments), 'commits' (commit messages), 'milestones', 'wiki_blobs'. Results are limited to the first 6 matching lines of each blob.${rulesBlock}
 
 Global search across projects/groups/users is not available with this token.`,
     parameters: {
       project: PROJECT_PARAM,
       scope: { type: "string", required: true, enum: SEARCH_SCOPES, description: "What to search: blobs, issues, notes, commits, milestones, or wiki_blobs." },
-      search: { type: "string", required: true, description: `Keyword or phrase. MUST be at least ${MIN_SEARCH_CHARS_CJK} characters for CJK terms (2-character Chinese terms are silently dropped and return zero results) and at least ${MIN_SEARCH_CHARS_LATIN} for ASCII. Include an adjacent CJK character when searching an ASCII word that appears glued to Chinese text.` },
+      search: {
+        type: "string",
+        required: true,
+        description: config.searchRules
+          ? `Keyword or phrase. MUST be at least ${MIN_SEARCH_CHARS_CJK} characters for CJK terms (2-character Chinese terms are silently dropped and return zero results) and at least ${MIN_SEARCH_CHARS_LATIN} for ASCII. Include an adjacent CJK character when searching an ASCII word that appears glued to Chinese text.`
+          : "Keyword or phrase to look for in this project."
+      },
       ref: { type: "string", description: "For scope 'blobs': search only this branch/tag/SHA." },
       page: { type: "number", description: "Page number (default 1)." },
       perPage: { type: "number", description: "Items per page (default 20, max 100)." }
@@ -825,11 +872,11 @@ Global search across projects/groups/users is not available with this token.`,
       const header = `Project search in ${args.project} (scope ${args.scope}, '${args.search}'):`;
       // Warn about an unusable term even when it happens to match something, so
       // the model does not generalise a lucky hit into "this term is fine".
-      const risk = describeSearchTermRisk(args.search);
+      const risk = describeSearchTermRisk(args.search, config.searchRules);
       const riskNote = risk ? `\n\nWARNING — ${risk}` : "";
       const body = results.length
         ? `${header}\n\n${lines.join("\n")}\n${total != null ? `\n(${results.length} of ${total})` : `\n(${results.length} shown${nextPage ? `; more available — call again with page=${nextPage}` : ""})`}`
-        : `${header}\n\n(no results)${emptyResultHint(args.search)}`;
+        : `${header}\n\n(no results)${emptyResultHint(args.search, config.searchRules)}`;
       return truncate(body + riskNote, config.maxOutputChars);
     },
     presentCall: (args) => ({ card: "generic", title: `${args.scope}: ${args.search}`, kind: "gitlab-search", rawInput: args.search })
@@ -1049,6 +1096,13 @@ function applyUploadFileTool(ctx, config) {
 // ---------------------------------------------------------------------------
 
 function apply(ctx, config) {
+  // Fail at mount time with the actionable message rather than at the first
+  // tool call: a deployment that never set `apiUrl` is a broken deployment.
+  if (!String(config.apiUrl ?? "").trim()) {
+    throw new Error(
+      "tool-gitlab: `apiUrl` is required. Set it to your GitLab API root, e.g. apiUrl: https://gitlab.example.com/api/v4 (include the /api/v4 suffix)."
+    );
+  }
   assertPositiveInteger("timeoutMs", config.timeoutMs);
   assertPositiveInteger("maxOutputChars", config.maxOutputChars);
 
@@ -1071,4 +1125,20 @@ function apply(ctx, config) {
   if (config.uploadFile) applyUploadFileTool(ctx, config);
 }
 
-export { Config, DEFAULT_API_URL, DEFAULT_TIMEOUT_MS, DEFAULT_TOKEN_ENV, SEARCH_SCOPES, apply, encodeProject, inject, name };
+export {
+  API_URL_PLACEHOLDER,
+  Config,
+  DEFAULT_MAX_OUTPUT_CHARS,
+  DEFAULT_TIMEOUT_MS,
+  DEFAULT_TOKEN_ENV,
+  MIN_SEARCH_CHARS_CJK,
+  MIN_SEARCH_CHARS_LATIN,
+  SEARCH_SCOPES,
+  apply,
+  baseUrl,
+  describeSearchTermRisk,
+  encodeProject,
+  emptyResultHint,
+  inject,
+  name
+};

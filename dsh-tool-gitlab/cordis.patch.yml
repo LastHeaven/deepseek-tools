@@ -1,0 +1,45 @@
+# GitLab tools bundle for DSH.
+#
+# Mounts ONE row: the native `tool-gitlab` plugin. It registers the gitlab_*
+# tools in-process through the `tools` registry — no MCP server, no stdio
+# bridge, no child process, no `mcp__gitlab__` prefix.
+#
+# ── REQUIRED: REPLACE `apiUrl` ───────────────────────────────────────────────
+# `apiUrl` has NO default. This patch ships a placeholder so the file stays a
+# valid bundle; point it at your own instance before/after installing:
+#
+#   apiUrl: https://gitlab.example.com/api/v4     # include /api/v4
+#
+# A bare origin (`https://gitlab.example.com`) also works — the plugin appends
+# `/api/v4` — but the explicit form is what this row uses, because GitLab
+# serves its web UI from the bare origin and answers 404 HTML for `/projects/1`.
+#
+# ── TOKEN: DO NOT PUT IT HERE ────────────────────────────────────────────────
+# No token is configured. The plugin resolves the credential reference named by
+# `tokenEnv` (default `GITLAB_TOKEN`) through the harness credential store at
+# call time, falling back to the same-named environment variable. The secret
+# therefore lives in $DSH_HOME/.credentials.yaml (or the process environment),
+# and rotating it needs no restart. `apiToken` exists as a config field for
+# throwaway deployments only.
+#
+# ── SCOPE COVERAGE ───────────────────────────────────────────────────────────
+# The tools assume a fine-grained PAT. Anything the token does not cover comes
+# back as a readable 403 with the missing scope named, instead of a bare status
+# code. Merge requests, pipelines, tags, releases, wikis, user/group lookups,
+# global search and branch/commit/file/label WRITES have no tool here — see
+# README.md for the measured matrix and the scopes that would unlock each one.
+- insert:
+    - id: tool-gitlab
+      name: '@deepseek-ai/dsh-tool-gitlab'
+      config:
+        # REQUIRED — replace with your own API root, keeping the /api/v4 suffix.
+        apiUrl: https://gitlab.example.com/api/v4
+        # Credential reference resolved at call time (store or environment).
+        tokenEnv: GITLAB_TOKEN
+        # Basic (Postgres) search silently drops <3-char CJK / <2-char ASCII
+        # terms and does not tokenize an ASCII word glued to CJK. These rules
+        # drive both the tool description and a runtime warning. Set false on an
+        # instance backed by Elasticsearch (GitLab Advanced Search).
+        searchRules: true
+        timeoutMs: 60000
+        maxOutputChars: 200000

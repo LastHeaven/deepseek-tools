@@ -1,20 +1,37 @@
 {
-  "name": "@local/dsh-tool-gitlab",
-  "description": "Model-facing GitLab tools (project/repo/issue read, issue & note create/update, uploads, project-scoped search) as a native Cordis plugin calling the GitLab REST API directly with a fine-grained PAT",
-  "version": "0.1.0",
+  "name": "@deepseek-ai/dsh-tool-gitlab",
+  "description": "GitLab tools as a native Cordis plugin calling the REST API directly: projects, repository files, branches, commits and diffs, issues and comments, labels, milestones, project-scoped search, issue writes and attachment uploads. Ships as a deployable bundle and requires no MCP server, child process, or instance-specific default.",
+  "version": "1.0.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "files": [
-    "lib/index.js"
+    "lib/index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
   ],
   "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "gitlab"
+  ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/schemastery": "*",
     "@deepseek-ai/dsh-tools": "*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }

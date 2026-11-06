@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "GitLab",
+    "description": "Connects any GitLab instance to an Agent through a native REST plugin: read projects, repository files, branches, commits and diffs, issues and comments, labels and milestones; search within a project, write issues and comments, and upload attachments. Point apiUrl at your own GitLab API root after installing; the token stays out of the config."
+  }
+}

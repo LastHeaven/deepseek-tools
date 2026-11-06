@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "GitLab",
+    "description": "通过原生 REST 插件接入任意 GitLab 实例的 Agent：读取项目、仓库文件、分支、提交与 diff、议题与评论、标签、里程碑，支持项目内搜索、议题写入与附件上传。安装后须把配置里的 apiUrl 改为你自己的 GitLab API 根地址，令牌不入配置。"
+  }
+}

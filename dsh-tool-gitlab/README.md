@@ -1,29 +1,46 @@
-# @local/dsh-tool-gitlab
+# @deepseek-ai/dsh-tool-gitlab
 
-Native Cordis tool plugin exposing GitLab tools against a self-hosted GitLab
+Native Cordis tool plugin exposing GitLab tools against **any** GitLab instance's
 REST API (`/api/v4`), authenticated with a **fine-grained personal access
-token**. It replaces the `mcp-gitlab` MCP-client row that used to run the
-official MCP server through a stdio OAuth bridge: these tools register
-in-process, carry no `mcp__gitlab__` prefix, and need no child process.
+token**. Nothing about a particular deployment — instance address, token, or
+filesystem path — is baked into the source: `apiUrl` is a **required** config
+field, so a half-configured deployment fails loudly instead of quietly querying
+whatever GitLab the plugin was developed against.
 
-- Instance: `http://192.168.2.204` (API root `http://192.168.2.204/api/v4`)
-- Installed as: `C:\Users\hxy\.dsh\profiles\web\node_modules\@local\dsh-tool-gitlab`
-- Mounted by: `D:/git/deepseek-tools/dsh-gitlab-mcp/cordis.patch.yml` (row `tool-gitlab`, inside `preset-gitlab`)
+It ships as a **bundle**: `package.json` declares `dsh.bundle.patch`, and the
+bundled `cordis.patch.yml` mounts the single `tool-gitlab` row, so one
+`dsh plugin … add` installs and activates it. The tools register in-process
+through the `tools` registry — no MCP server, no stdio bridge, no child process,
+and no `mcp__gitlab__` prefix.
+
+```yaml
+- id: tool-gitlab
+  name: '@deepseek-ai/dsh-tool-gitlab'
+  config:
+    apiUrl: https://gitlab.example.com/api/v4   # REQUIRED — yours, not ours
+    tokenEnv: GITLAB_TOKEN
+```
+
+See [Configuration](#configuration) for every field and [Install](#install)
+for the deployment steps.
 
 ---
 
 ## Capability matrix (measured, not assumed)
 
-The plugin registers **only** what the token can actually do. Every row below was
-verified against the live instance with `curl`/`fetch` on 2026-10-29; the 403
-column quotes GitLab's own `insufficient_granular_scope` answer.
+The plugin registers **only** what a fine-grained token can do. Every row below
+was verified against a real GitLab instance with `curl`/`fetch`; the 403 column
+quotes GitLab's own `insufficient_granular_scope` answer. Which rows your
+deployment reaches depends on the scopes you grant — the tools degrade with that
+same readable message rather than a bare status code, so a narrower token is
+supported, it just exposes less.
 
 | Area | Available? | Evidence |
 | --- | --- | --- |
-| Project metadata (`/projects/:id`) | ✅ | 200 with both numeric id and `cx%2Ftrip` |
+| Project metadata (`/projects/:id`) | ✅ | 200 with both numeric id and `group%2Fproject` |
 | Branches / commits / commit diff | ✅ | 200; `ref_name`, `path`, `since`, `until` filters work |
 | Repository tree / file content | ✅ | 200; the files endpoint *requires* `ref` (400 without) |
-| Issues: list / get / notes | ✅ | 200; `x-total` 9878 issues on `cx/trip` |
+| Issues: list / get / notes | ✅ | 200; paging headers (`x-total`, `x-next-page`) present |
 | Issues: create / update / add note / link | ✅ | 201/200 (create, close, comment, link all exercised) |
 | Labels / milestones (read) | ✅ | 200 |
 | Uploads (`POST /projects/:id/uploads`) | ✅ | 201, returns `/uploads/<hash>/<name>` |
@@ -38,24 +55,28 @@ column quotes GitLab's own `insufficient_granular_scope` answer.
 | Delete issue / note / link / milestone / upload | ❌ 403 | needs *Work Item: Delete* |
 | Milestone create & close | ✅ | 201 / 200 (unused by the tools) |
 
-Consequence for the agent: **labels must already exist** (look them up with
-`gitlab_list_labels`), **assignees need numeric user ids** (there is no user
-lookup), and **nothing can be deleted** — the tools create and close, never
-remove.
+The ❌ rows are a **token** limit, not a plugin limit. Whatever scopes you grant,
+the consequence for the agent stays the same unless you add the corresponding
+tool: **labels must already exist** (look them up with `gitlab_list_labels`),
+**assignees need numeric user ids** (there is no user lookup), and **nothing can
+be deleted** — the tools create and close, never remove.
 
-To unlock a missing area, edit the token at
-`http://192.168.2.204/-/user_settings/personal_access_tokens`, add the scope,
-then re-register the corresponding tool in `lib/index.js`.
+To unlock a missing area: add the scope at
+`https://<your-gitlab>/-/user_settings/personal_access_tokens`, then re-register
+the corresponding tool in `lib/index.js` and reinstall.
 
 ---
 
 ## Search-term rules (measured; the tools enforce them)
 
-This instance runs GitLab's **basic (Postgres) search**, not Elasticsearch, and it
-fails *silently*: an unusable term returns HTTP 200 with an empty list, which reads
-as "no such issue" when the opposite is true. Both traps below were measured on the
-live instance and are enforced in two places — the tool descriptions, and a runtime
-warning attached to any matching call.
+GitLab's default **basic (Postgres) search** fails *silently*: an unusable term
+returns HTTP 200 with an empty list, which reads as "no such issue" when the
+opposite is true. Both traps below were measured on a real instance and are
+enforced in two places — the tool descriptions, and a runtime warning attached
+to any matching call. An instance backed by Elasticsearch (GitLab Advanced
+Search) tolerates both, so set `searchRules: false` there to drop the warnings;
+the tool description changes with it, so the model is never told a rule that
+does not apply.
 
 > **Why not a system-prompt section.** The plugin used to also register one
 > `ctx.systemPrompt.section()` per tool, mirroring the description text. With 17
@@ -68,7 +89,7 @@ warning attached to any matching call.
 
 ### 1. Minimum term length (CJK 3, ASCII 2)
 
-| Term | Length | Results on cx/trip |
+| Term | Length | Results in one measured project |
 | --- | --- | --- |
 | `酒` | 1 | **0** |
 | `酒店` | 2 | **0** ← silently dropped |
@@ -83,7 +104,7 @@ most likely way to get a false "not found".
 
 ### 2. ASCII glued to CJK is not tokenized alone
 
-For the issue titled `manager-frontend项目webpack升级` (cx/order-frontend-m #16):
+For an issue titled `manager-frontend项目webpack升级`:
 
 | Term | Results |
 | --- | --- |
@@ -158,19 +179,21 @@ Notes on the write contract:
 
 ```yaml
 - id: tool-gitlab
-  name: '@local/dsh-tool-gitlab'
+  name: '@deepseek-ai/dsh-tool-gitlab'
   config:
-    apiUrl: http://192.168.2.204/api/v4
+    apiUrl: https://gitlab.example.com/api/v4   # REQUIRED
     tokenEnv: GITLAB_TOKEN
+    searchRules: true
     timeoutMs: 60000
     maxOutputChars: 200000
 ```
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `apiUrl` | `http://192.168.2.204/api/v4` | API root. A missing `/api/v4` is appended (the bare origin serves the web UI and answers 404 HTML) |
+| `apiUrl` | **none — required** | API root including `/api/v4`. A missing `/api/v4` is appended (the bare origin serves the web UI and answers 404 HTML). Omitting it fails the plugin at mount with an actionable message |
 | `apiToken` | `""` | Literal token; wins over `tokenEnv` when set. Prefer leaving it empty |
 | `tokenEnv` | `GITLAB_TOKEN` | Credential reference resolved through the harness credential store, then the process environment |
+| `searchRules` | `true` | Emit the basic-search term warnings and include them in the tool description. Set `false` on an Elasticsearch-backed instance |
 | `timeoutMs` | `60000` | Cooperative per-call budget attached to every tool |
 | `maxOutputChars` | `200000` | Hard cap on tool output |
 | `getProject` … `uploadFile` | `true` | Per-tool switches (one boolean per tool name in camelCase) |
@@ -183,50 +206,87 @@ Rotating the token needs no restart.
 
 ---
 
-## Install / update
+## Install
 
-The plugin imports only `@deepseek-ai/*` peer packages and Node builtins, so it
-installs as a plain copy — no pnpm step, no link:
+`package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts the one
+`tool-gitlab` row — so this installs as a bundle, not as a hand-copied module.
+`dsh plugin add` picks up the bundle, adds it to `dsh.profile.bundles`, and
+activates it in the same step.
 
-```powershell
-$src = "D:\git\deepseek-tools\dsh-tool-gitlab"
-$dst = "C:\Users\hxy\.dsh\profiles\web\node_modules\@local\dsh-tool-gitlab"
-New-Item -ItemType Directory -Force -Path "$dst\lib" | Out-Null
-Copy-Item "$src\package.json" "$dst\package.json" -Force
-Copy-Item "$src\lib\index.js" "$dst\lib\index.js" -Force
-```
-
-Then reload the profile (the patch file is watched; a restart is the reliable
-fallback):
+### From a local checkout
 
 ```powershell
-node "D:\npm\node_global\node_modules\@deepseek-ai\dsh\lib\bin.js" --profile web --dump-config | Select-String tool-gitlab
+dsh plugin --profile web add <path-to-dsh-tool-gitlab>
 ```
+
+### From a registry (once published)
+
+```powershell
+dsh plugin --profile web add @deepseek-ai/dsh-tool-gitlab
+```
+
+### Then point it at your instance
+
+The bundled patch ships the placeholder
+`apiUrl: https://gitlab.example.com/api/v4`; replace it in the profile's
+`cordis.patch.yml` (that file overrides bundle layers, so the placeholder stays
+as packaging metadata):
+
+```yaml
+- id: tool-gitlab
+  name: '@deepseek-ai/dsh-tool-gitlab'
+  config:
+    apiUrl: https://gitlab.example.com/api/v4   # your API root, /api/v4 included
+    tokenEnv: GITLAB_TOKEN
+```
+
+…and store the token (or export it as `GITLAB_TOKEN`):
+
+```yaml
+# $DSH_HOME/.credentials.yaml
+refs:
+  GITLAB_TOKEN: glpat-…
+```
+
+Verify composition, then restart the profile:
+
+```powershell
+dsh --profile web --dump-config | Select-String tool-gitlab -Context 0,6
+```
+
+### Update
+
+Re-run `add` with the new source, then restart. The bundle patch is watched, but
+a restart is the reliable path.
 
 ---
 
 ## Smoke test
 
 ```powershell
-cd D:\git\deepseek-tools\dsh-tool-gitlab
+cd <path-to-dsh-tool-gitlab>
 
-# read-only checks against cx/trip
+# GITLAB_API_URL is required — there is no built-in instance
+$env:GITLAB_API_URL = 'https://gitlab.example.com/api/v4'
+$env:GITLAB_SMOKE_PROJECT = 'group/project'
 node smoke-test.mjs
 
 # also exercise the write path in a scratch project
 $env:GITLAB_SMOKE_WRITE = '1'
-$env:GITLAB_SMOKE_WRITE_PROJECT = 'hexingyu/test-merge'
+$env:GITLAB_SMOKE_WRITE_PROJECT = 'group/scratch'
 node smoke-test.mjs
 
 # also exercise an upload
-$env:GITLAB_SMOKE_UPLOAD = 'D:\git\deepseek-tools\dsh-tool-gitlab\package.json'
+$env:GITLAB_SMOKE_UPLOAD = '<path-to-dsh-tool-gitlab>\package.json'
 node smoke-test.mjs
 ```
 
-The test imports the **installed** copy (peer deps resolve there, not in this
-checkout) — override with `GITLAB_PLUGIN=<file:///…/lib/index.js>`. It reads the
-token from `GITLAB_TOKEN` or from `$DSH_HOME/.credentials.yaml` and never prints
-it.
+The test imports the **installed** bundle (peer deps resolve from the profile's
+`node_modules` and the DSH fallback layer, not from this checkout) — it defaults
+to `$DSH_HOME/profiles/<web>/node_modules/@deepseek-ai/dsh-tool-gitlab`, with
+`DSH_HOME`, `GITLAB_PLUGIN_PROFILE`, and `GITLAB_PLUGIN=<file:///…/lib/index.js>`
+as overrides. It reads the token from `GITLAB_TOKEN` or from
+`$DSH_HOME/.credentials.yaml` and never prints it.
 
-The write path creates one issue and leaves it **closed with a comment**: this
-token cannot delete issues, so the test prints the iid it left behind.
+The write path creates one issue and leaves it **closed with a comment**: a
+token that cannot delete issues means the test prints the iid it left behind.

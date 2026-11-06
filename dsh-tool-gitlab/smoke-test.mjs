@@ -1,34 +1,53 @@
-// Smoke test for @local/dsh-tool-gitlab.
+// Smoke test for @deepseek-ai/dsh-tool-gitlab.
 //
 // Drives the plugin WITHOUT the DSH loader: it builds a fake ctx, calls apply(),
-// and then exercises the registered tools against the live GitLab instance. The
-// loader is skipped on purpose, so the config object passed here must be complete
-// (no schemastery defaults are applied).
+// and then exercises the registered tools against a real GitLab instance. The
+// loader is skipped on purpose, so the config object passed here must be
+// complete (no schemastery defaults are applied).
 //
-//   node smoke-test.mjs                      register + read-only checks
-//   GITLAB_SMOKE_WRITE=1 node smoke-test.mjs also create/close a scratch issue
-//   GITLAB_SMOKE_UPLOAD=<path> node smoke-test.mjs  also upload that file
+//   GITLAB_API_URL=https://gitlab.example.com/api/v4 node smoke-test.mjs
+//   … GITLAB_SMOKE_WRITE=1            also create/close a scratch issue
+//   … GITLAB_SMOKE_UPLOAD=<path>      also upload that file
 //
-// The token comes from the harness credential store (`GITLAB_TOKEN`) or from the
+// GITLAB_API_URL is required — the plugin has no built-in instance. The token
+// comes from the harness credential store (`GITLAB_TOKEN`) or from the
 // GITLAB_TOKEN environment variable; it is never printed.
 
-// Peer deps (`@deepseek-ai/*`) resolve from the DSH profile, not from this
-// checkout, so the test drives the INSTALLED copy. Override with GITLAB_PLUGIN.
+// Peer deps (`@deepseek-ai/*`) resolve from a DSH profile, not from this
+// checkout when it has none installed, so the test defaults to the INSTALLED
+// bundle and resolves the profile through DSH_HOME. Override with GITLAB_PLUGIN.
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
+
+const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), ".dsh");
+const PROFILE = process.env.GITLAB_PLUGIN_PROFILE ?? "web";
 
 const PLUGIN =
   process.env.GITLAB_PLUGIN ??
-  "file:///C:/Users/hxy/.dsh/profiles/web/node_modules/@local/dsh-tool-gitlab/lib/index.js";
+  pathToFileURL(
+    join(DSH_HOME, "profiles", PROFILE, "node_modules", "@deepseek-ai", "dsh-tool-gitlab", "lib", "index.js")
+  ).href;
 
-const { apply, name, inject, Config } = await import(PLUGIN);
+const { apply, name, inject, Config, API_URL_PLACEHOLDER } = await import(PLUGIN);
 
-const PROJECT = process.env.GITLAB_SMOKE_PROJECT ?? "cx/trip";
+const API_URL = process.env.GITLAB_API_URL ?? API_URL_PLACEHOLDER;
+if (!process.env.GITLAB_API_URL) {
+  console.error(
+    `GITLAB_API_URL is required (e.g. https://gitlab.example.com/api/v4). Falling back to the placeholder ${API_URL_PLACEHOLDER} would query a host that does not exist.`
+  );
+  process.exit(1);
+}
+
+const PROJECT = process.env.GITLAB_SMOKE_PROJECT ?? "group/project";
+// A term that exists in most repositories (a word from the README, a branch
+// name, …). Override when the default does not occur in the target project.
+const SEARCHABLE_TERM = process.env.GITLAB_SMOKE_SEARCH ?? "the";
 
 function loadToken() {
   if (process.env.GITLAB_TOKEN) return process.env.GITLAB_TOKEN;
-  const file = join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), ".credentials.yaml");
+  const file = join(DSH_HOME, ".credentials.yaml");
   if (!existsSync(file)) return undefined;
   const text = readFileSync(file, "utf8");
   const match = /^\s*GITLAB_TOKEN:\s*(.+?)\s*$/m.exec(text);
@@ -66,9 +85,10 @@ const ctx = {
 };
 
 const config = {
-  apiUrl: process.env.GITLAB_API_URL ?? "http://192.168.2.204",
+  apiUrl: API_URL,
   apiToken: token,
   tokenEnv: "GITLAB_TOKEN",
+  searchRules: true,
   getProject: true,
   listBranches: true,
   listCommits: true,
@@ -139,13 +159,13 @@ const commits = await quietly("gitlab_list_commits", { project: PROJECT, perPage
 const sha = /^([0-9a-f]{8}) /m.exec(commits ?? "")?.[1];
 if (sha) await check("gitlab_get_commit (with diff)", () => byName.gitlab_get_commit.execute({ project: PROJECT, sha, diff: true, maxDiffChars: 2000 }, exec), (v) => /message:/.test(v));
 
-await check("gitlab_list_tree", () => byName.gitlab_list_tree.execute({ project: PROJECT, path: "docs", perPage: 5 }, exec), (v) => /Tree of/.test(v));
-await check("gitlab_get_repository_file", () => byName.gitlab_get_repository_file.execute({ project: PROJECT, filePath: "README.md" }, exec), (v) => /trip|File README/.test(v));
+await check("gitlab_list_tree", () => byName.gitlab_list_tree.execute({ project: PROJECT, perPage: 5 }, exec), (v) => /Tree of/.test(v));
+await check("gitlab_get_repository_file", () => byName.gitlab_get_repository_file.execute({ project: PROJECT, filePath: "README.md" }, exec), (v) => /^File |description:/.test(v));
 await check("gitlab_list_issues", () => byName.gitlab_list_issues.execute({ project: PROJECT, perPage: 2 }, exec), (v) => /Issues in/.test(v));
 await check("gitlab_list_labels", () => byName.gitlab_list_labels.execute({ project: PROJECT, perPage: 5 }, exec), (v) => /Labels in/.test(v));
 await check("gitlab_list_milestones", () => byName.gitlab_list_milestones.execute({ project: PROJECT, perPage: 3 }, exec), (v) => /Milestones in/.test(v));
-await check("gitlab_search_project (blobs)", () => byName.gitlab_search_project.execute({ project: PROJECT, scope: "blobs", search: "hotel", perPage: 2 }, exec), (v) => /Project search/.test(v));
-await check("gitlab_search_project (issues)", () => byName.gitlab_search_project.execute({ project: PROJECT, scope: "issues", search: "hotel", perPage: 2 }, exec), (v) => /Project search/.test(v));
+await check("gitlab_search_project (blobs)", () => byName.gitlab_search_project.execute({ project: PROJECT, scope: "blobs", search: SEARCHABLE_TERM, perPage: 2 }, exec), (v) => /Project search/.test(v));
+await check("gitlab_search_project (issues)", () => byName.gitlab_search_project.execute({ project: PROJECT, scope: "issues", search: SEARCHABLE_TERM, perPage: 2 }, exec), (v) => /Project search/.test(v));
 
 const issueList = await quietly("gitlab_list_issues", { project: PROJECT, perPage: 1 });
 const iid = /#(\d+) \[/.exec(issueList ?? "")?.[1];
@@ -155,7 +175,7 @@ if (iid) {
 }
 
 if (process.env.GITLAB_SMOKE_WRITE === "1") {
-  const writeProject = process.env.GITLAB_SMOKE_WRITE_PROJECT ?? "hexingyu/test-merge";
+  const writeProject = process.env.GITLAB_SMOKE_WRITE_PROJECT ?? PROJECT;
   let created;
   try {
     created = await byName.gitlab_create_issue.execute({
@@ -185,7 +205,7 @@ if (process.env.GITLAB_SMOKE_WRITE === "1") {
 }
 
 if (process.env.GITLAB_SMOKE_UPLOAD) {
-  await check("gitlab_upload_file", () => byName.gitlab_upload_file.execute({ project: process.env.GITLAB_SMOKE_PROJECT ?? PROJECT, filePath: process.env.GITLAB_SMOKE_UPLOAD }, exec), (v) => /path: \/uploads\//.test(v));
+  await check("gitlab_upload_file", () => byName.gitlab_upload_file.execute({ project: PROJECT, filePath: process.env.GITLAB_SMOKE_UPLOAD }, exec), (v) => /path: \/uploads\//.test(v));
 }
 
 console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}`);
