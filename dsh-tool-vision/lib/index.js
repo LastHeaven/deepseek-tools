@@ -629,12 +629,20 @@ function apply(ctx, config) {
       const hasImage = await resolveModelHasImage(llmCtx, context);
       const assembled = await next();
       if (hasImage === undefined) return assembled;
+      const sections = hasImage === true && Array.isArray(assembled.sections)
+        ? assembled.sections.filter((section) => section.name !== VISION_SECTION)
+        : assembled.sections;
+      // dsh >= 0.2.2 no longer carries `tools` in the waterfall payload: tool
+      // declarations are provider-owned and attached AFTER the waterfall runs
+      // (see dsh-system-prompt `assemble()`). Masking unconditionally threw
+      // "Cannot read properties of undefined (reading 'filter')" on every turn,
+      // so mask only when the payload still exposes the array; on newer runtimes
+      // the schema mask degrades to a no-op and the sections mask carries on.
+      if (!Array.isArray(assembled.tools)) return { ...assembled, sections };
       return {
         ...assembled,
         tools: maskToolSchemas(assembled.tools, hasImage),
-        sections: hasImage === true
-          ? assembled.sections.filter((section) => section.name !== VISION_SECTION)
-          : assembled.sections
+        sections
       };
     });
   });

@@ -41,8 +41,12 @@ if (!token) {
   process.exit(1);
 }
 
-// The fake ctx: only the two injected services plus the optional credential seam
+// The fake ctx: the injected `tools` service plus the optional credential seam
 // (left undefined here, so the plugin takes the process-environment path).
+// `systemPrompt` is no longer injected — the per-tool prompt sections were
+// folded into the tool descriptions to halve the per-request prompt cost — but
+// the stub stays so a regression that reintroduces a section still registers
+// instead of throwing.
 const registered = [];
 const sections = [];
 const ctx = {
@@ -93,12 +97,17 @@ apply(ctx, config);
 
 console.log(`plugin: ${name} | inject: ${JSON.stringify(inject)}`);
 console.log(`tools (${registered.length}): ${registered.map((t) => t.name).join(", ")}`);
-console.log(`prompt sections: ${sections.length}`);
+let failures = 0;
+
+console.log(`prompt sections: ${sections.length} (expected 0 — descriptions carry the guidance)`);
+if (sections.length !== 0) {
+  console.log(`  WARNING: prompt sections were re-registered; the per-request cost doubled back up.`);
+  failures += 1;
+}
 const byName = Object.fromEntries(registered.map((t) => [t.name, t]));
 const signal = AbortSignal.timeout(60000);
 const exec = { signal };
 
-let failures = 0;
 async function check(label, fn, expect = () => true) {
   try {
     const value = await fn();

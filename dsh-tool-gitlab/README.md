@@ -54,8 +54,17 @@ then re-register the corresponding tool in `lib/index.js`.
 This instance runs GitLab's **basic (Postgres) search**, not Elasticsearch, and it
 fails *silently*: an unusable term returns HTTP 200 with an empty list, which reads
 as "no such issue" when the opposite is true. Both traps below were measured on the
-live instance and are enforced in three places — the tool descriptions, the
-system-prompt section, and a runtime warning attached to any matching call.
+live instance and are enforced in two places — the tool descriptions, and a runtime
+warning attached to any matching call.
+
+> **Why not a system-prompt section.** The plugin used to also register one
+> `ctx.systemPrompt.section()` per tool, mirroring the description text. With 17
+> tools that cost **5,587 characters on every request** on top of the 18,022
+> characters of tool schemas, and it duplicated guidance the model already read in
+> the descriptions (`gitlab_search_project` alone carried the same rule block
+> twice, 780 + 922 chars). The sections were removed and their few unique
+> sentences folded into the descriptions; `inject` is now `["tools"]` only.
+> Measured total dropped 23,609 → 19,140 characters (≈ −19%).
 
 ### 1. Minimum term length (CJK 3, ASCII 2)
 

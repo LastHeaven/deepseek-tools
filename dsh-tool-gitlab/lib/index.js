@@ -45,7 +45,7 @@ import { basename, extname } from "node:path";
 /** Cordis plugin name used by loader diagnostics. */
 const name = "tool-gitlab";
 /** Services required by the tool suite. */
-const inject = ["tools", "systemPrompt"];
+const inject = ["tools"];
 
 /** Default cooperative tool-call budget (ms) attached to every tool. */
 const DEFAULT_TIMEOUT_MS = 60000;
@@ -413,11 +413,6 @@ const PROJECT_PARAM = {
 };
 
 function applyGetProjectTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_get_project",
-    order: 120,
-    text: "Use gitlab_get_project to confirm a project's numeric id, default branch, and feature flags before other gitlab_* calls. The token cannot list projects or groups, so pass a 'group/project' path (e.g. 'cx/trip') you already know."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_get_project",
     description: "Returns one GitLab project's metadata: numeric id, full path, default branch, visibility, web URL, feature flags (issues / merge requests / wiki), and open issue count. Use this to turn a 'group/project' path into a numeric id, or to read the default branch. Listing projects, groups, users, and members is NOT available with this token.",
@@ -434,14 +429,9 @@ function applyGetProjectTool(ctx, config) {
 }
 
 function applyListBranchesTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_list_branches",
-    order: 121,
-    text: "Use gitlab_list_branches to discover branch names (and the default branch) in a project. Creating, deleting, or protecting branches is NOT permitted for this token."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_list_branches",
-    description: "Lists a GitLab project's repository branches with their head commit (short id, date, author, title), default/protected/merged flags. Supports `search` to filter by name. Read-only: this token cannot create, delete, or protect branches.",
+    description: "Lists a GitLab project's repository branches with their head commit (short id, date, author, title), default/protected/merged flags. Supports `search` to filter by name. Read-only: this token cannot create, delete, or protect branches, so a branch change means a local checkout plus a normal `git push`.",
     parameters: {
       project: PROJECT_PARAM,
       search: { type: "string", description: "Return only branches whose name contains this string." },
@@ -464,14 +454,9 @@ function applyListBranchesTool(ctx, config) {
 }
 
 function applyListCommitsTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_list_commits",
-    order: 122,
-    text: "Use gitlab_list_commits to inspect commit history, optionally narrowed by ref (branch/tag/sha), file path, author, or date range. Follow with gitlab_get_commit when you need the diff. This token cannot create commits or write repository files."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_list_commits",
-    description: "Lists commits in a GitLab project's repository, newest first, filtered by ref/branch, path, author, or date range. Returns short id, committed date, author, and the first line of the message. Use `path` to see the history of a single file, and `ref` to pick the branch (empty means the default branch).",
+    description: "Lists commits in a GitLab project's repository, newest first, filtered by ref/branch, path, author, or date range. Returns short id, committed date, author, and the first line of the message. Use `path` to see the history of a single file, and `ref` to pick the branch (empty means the default branch). Follow with gitlab_get_commit when you need the diff. This token cannot create commits or write repository files.",
     parameters: {
       project: PROJECT_PARAM,
       ref: { type: "string", description: "Branch, tag, or commit SHA to list from (default: the project's default branch)." },
@@ -503,14 +488,9 @@ function applyListCommitsTool(ctx, config) {
 }
 
 function applyGetCommitTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_get_commit",
-    order: 123,
-    text: "Use gitlab_get_commit to read one commit's full message and its diff (pass `diff: true`). Use the short id from gitlab_list_commits, or a full SHA."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_get_commit",
-    description: "Returns one commit's full metadata (message body, author, committer, parents, stats) and — with `diff: true` — the file-level diff. Diffs can be large; pass `filePath` to narrow one file, or `maxDiffChars` to bound the output.",
+    description: "Returns one commit's full metadata (message body, author, committer, parents, stats) and — with `diff: true` — the file-level diff. Diffs can be large; pass `filePath` to narrow one file, or `maxDiffChars` to bound the output. Pass the short id from gitlab_list_commits, or a full SHA.",
     parameters: {
       project: PROJECT_PARAM,
       sha: { type: "string", required: true, description: "Commit SHA or short id (e.g. 'd55ff6d')." },
@@ -562,14 +542,9 @@ function applyGetCommitTool(ctx, config) {
 }
 
 function applyListTreeTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_list_tree",
-    order: 124,
-    text: "Use gitlab_list_tree to browse a repository at a ref: pass `path` to descend into a directory and `recursive: true` to list everything below it. Read the model-facing output for the exact file paths to pass to gitlab_get_repository_file."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_list_tree",
-    description: "Lists files and directories in a GitLab repository at a ref (branch/tag/SHA) and path. Returns each entry's type (blob/tree), path, and mode. Use `recursive: true` to list a whole subtree in one call (bounded by `perPage`).",
+    description: "Lists files and directories in a GitLab repository at a ref (branch/tag/SHA) and path. Returns each entry's type (blob/tree), path, and mode. Use `recursive: true` to list a whole subtree in one call (bounded by `perPage`); `path` descends into a directory. The result names the exact paths to pass to gitlab_get_repository_file.",
     parameters: {
       project: PROJECT_PARAM,
       path: { type: "string", description: "Directory path inside the repository; omit for the root." },
@@ -597,14 +572,9 @@ function applyListTreeTool(ctx, config) {
 }
 
 function applyGetFileTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_get_repository_file",
-    order: 125,
-    text: "Use gitlab_get_repository_file to read one file's content at a ref. Binary files (images, archives) must not be fetched: this tool refuses them and reports the size instead. Writing files is NOT permitted for this token — changes go through a local checkout and a normal git push."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_get_repository_file",
-    description: "Reads one file from a GitLab repository at a ref and returns its text. Refuses binary files (images/archives/binaries) and files above `maxBytes`, reporting their size instead. Read-only: this token has no permission to write repository files.",
+    description: "Reads one file from a GitLab repository at a ref and returns its text. Refuses binary files (images/archives/binaries) and files above `maxBytes`, reporting their size instead. Read-only: this token has no permission to write repository files — make changes through a local checkout and a normal git push.",
     parameters: {
       project: PROJECT_PARAM,
       filePath: { type: "string", required: true, description: "Repository path of the file, e.g. 'docs/hotel/expedia-region-hotel-cityId'." },
@@ -645,13 +615,6 @@ function applyGetFileTool(ctx, config) {
 }
 
 function applyListIssuesTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_list_issues",
-    order: 126,
-    text: `Use gitlab_list_issues to find issues by state, labels, milestone, assignee, or free-text search. Issues are the work-item surface this token can read and write: merge requests and pipelines are NOT available. Prefer \`labels\` and \`search\` filters over paging through everything.
-
-The \`search\` filter follows the same instance rules as gitlab_search_project: a CJK term needs >= ${MIN_SEARCH_CHARS_CJK} characters (shorter terms are silently dropped and return an empty list) and an ASCII word glued to CJK is not tokenized alone. A zero-result search usually means the TERM was unusable, not that the issue does not exist.`
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_list_issues",
     description: `Lists a project's issues with state/label/milestone/assignee/search filters, ordered by creation or update time. Returns iid, title, state, author, assignees, labels, milestone, last update, comment count, and web URL. Merge requests are not included: they are a separate resource this token cannot read.
@@ -711,14 +674,9 @@ The free-text \`search\` filter needs >= ${MIN_SEARCH_CHARS_CJK} characters for 
 }
 
 function applyGetIssueTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_get_issue",
-    order: 127,
-    text: "Use gitlab_get_issue to read one issue's full description and, with `includeNotes: true`, its comments. Read the description before editing it: gitlab_update_issue replaces the whole description when one is supplied."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_get_issue",
-    description: "Returns one issue's full record: title, state, description (markdown as stored), author, assignees, labels, milestone, dates, web URL, and — with `includeNotes: true` — its comments (system notes included, oldest first).",
+    description: "Returns one issue's full record: title, state, description (markdown as stored), author, assignees, labels, milestone, dates, web URL, and — with `includeNotes: true` — its comments (system notes included, oldest first). Read the description before editing it: gitlab_update_issue replaces the whole description when one is supplied.",
     parameters: {
       project: PROJECT_PARAM,
       iid: { type: "number", required: true, description: "Issue iid (the number in '#123', not the global id)." },
@@ -744,14 +702,9 @@ function applyGetIssueTool(ctx, config) {
 }
 
 function applyListIssueNotesTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_list_issue_notes",
-    order: 128,
-    text: "Use gitlab_list_issue_notes to page through an issue's comment thread newest-first, e.g. to find the latest status update. System notes record label/assignee changes made by GitLab itself."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_list_issue_notes",
-    description: "Lists an issue's comments (notes) with author, timestamp, and body; `system` notes are GitLab's own change records. Newest first by default.",
+    description: "Lists an issue's comments (notes) with author, timestamp, and body; `system` notes are GitLab's own label/assignee change records. Newest first by default.",
     parameters: {
       project: PROJECT_PARAM,
       iid: { type: "number", required: true, description: "Issue iid." },
@@ -779,14 +732,9 @@ function applyListIssueNotesTool(ctx, config) {
 }
 
 function applyListLabelsTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_list_labels",
-    order: 129,
-    text: "Use gitlab_list_labels to discover the exact label names a project uses before setting `labels` on an issue — a misspelled label creates noise. Creating, renaming, and deleting labels is NOT permitted for this token, so only use names this tool returns."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_list_labels",
-    description: "Lists a project's labels with their colors and descriptions, optionally filtered by a search term. Use it to look up exact label names before writing them to an issue. Label writes (create/update/delete) are not permitted for this token.",
+    description: "Lists a project's labels with their colors and descriptions, optionally filtered by a search term. Use it to look up exact label names before writing them to an issue. Label writes (create/update/delete) are not permitted for this token, so only ever use names this tool returns — a misspelled label creates noise.",
     parameters: {
       project: PROJECT_PARAM,
       search: { type: "string", description: "Only labels whose name contains this string." },
@@ -809,14 +757,9 @@ function applyListLabelsTool(ctx, config) {
 }
 
 function applyListMilestonesTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_list_milestones",
-    order: 130,
-    text: "Use gitlab_list_milestones to discover milestone titles and iids before assigning one to an issue (gitlab_update_issue takes `milestoneId` = the milestone's `iid`)."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_list_milestones",
-    description: "Lists a project's milestones with their iid, title, state, due date, and description headline. Pass the returned `iid` as `milestoneId` to gitlab_update_issue.",
+    description: "Lists a project's milestones with their iid, title, state, due date, and description headline. Discover milestone titles and iids here before assigning one to an issue. Pass the returned `iid` as `milestoneId` to gitlab_update_issue.",
     parameters: {
       project: PROJECT_PARAM,
       state: { type: "string", enum: ["active", "closed", "all"], description: "Milestone state (default 'active')." },
@@ -841,19 +784,6 @@ function applyListMilestonesTool(ctx, config) {
 }
 
 function applySearchProjectTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_search_project",
-    order: 131,
-    text: `Use gitlab_search_project for keyword search INSIDE one project: scope 'blobs' searches file content, 'issues' and 'notes' search issue text and comments, 'commits' searches commit messages, 'milestones' searches milestones. It works on EVERY project this token can see, not only a particular one — pass the 'group/project' path you need.
-
-SEARCH-TERM RULES (measured on this instance, which runs basic search, not Elasticsearch) — ignore them and you will wrongly report "nothing found":
-  * A CJK term needs at least ${MIN_SEARCH_CHARS_CJK} characters. Shorter terms are SILENTLY DROPPED and return HTTP 200 with zero results: "${"酒店"}" finds nothing while "${"酒店预"}" finds 20. Never search a 2-character Chinese word and conclude the issue does not exist.
-  * ASCII terms need at least ${MIN_SEARCH_CHARS_LATIN} characters.
-  * An ASCII word glued to CJK text is not tokenized on its own: "webpack" misses the issue titled "manager-frontend项目webpack升级", while "webpack升" and "项目webpack" both find it.
-  * An empty result therefore means "try a different term" far more often than "absent". Re-run with a longer, more distinctive fragment before saying something does not exist.
-
-Instance-wide global search (across projects, groups, users) is NOT permitted for this token via REST — always scope to a known project.`
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_search_project",
     description: `Keyword search scoped to ONE project (works on every project this token can see). Scopes: 'blobs' (file contents), 'issues' (issue title/description), 'notes' (issue comments), 'commits' (commit messages), 'milestones', 'wiki_blobs'. Results are limited to the first 6 matching lines of each blob.
@@ -907,14 +837,9 @@ Global search across projects/groups/users is not available with this token.`,
 }
 
 function applyCreateIssueTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_create_issue",
-    order: 132,
-    text: "Use gitlab_create_issue to file an issue. Write the description in markdown and reference uploaded attachments by their '/uploads/<hash>/<name>' path (from gitlab_upload_file) — never a raw branch URL. Look label names up with gitlab_list_labels first; this token cannot create labels. Assignees need numeric user ids, and this token cannot list users, so leave `assigneeIds` unset unless the user supplied ids."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_create_issue",
-    description: "Creates an issue and returns its iid and web URL. Supports title, markdown description, labels (existing names only), milestone, due date, confidentiality, and numeric assignee ids. Marked non-concurrent-safe: it is a write with an observable side effect.",
+    description: "Creates an issue and returns its iid and web URL. Supports title, markdown description, labels (existing names only), milestone, due date, confidentiality, and numeric assignee ids. Look label names up with gitlab_list_labels first (this token cannot create labels), and leave `assigneeIds` unset unless you were given numeric ids. Marked non-concurrent-safe: it is a write with an observable side effect.",
     parameters: {
       project: PROJECT_PARAM,
       title: { type: "string", required: true, description: "Issue title." },
@@ -952,14 +877,9 @@ function applyCreateIssueTool(ctx, config) {
 }
 
 function applyUpdateIssueTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_update_issue",
-    order: 133,
-    text: "Use gitlab_update_issue to change an issue's title, description, labels, milestone, assignees, due date, or state. A supplied `description` REPLACES the stored one entirely: read the current description with gitlab_get_issue first and resend the full edited text, never a fragment. Use `addLabels`/`removeLabels` to adjust labels without resending the whole list, and `stateEvent: 'close'` to close."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_update_issue",
-    description: "Updates one issue and returns the resulting record summary. Any field you omit is left untouched, except `description`, which replaces the whole stored text when supplied. Use addLabels/removeLabels for incremental label changes, and stateEvent ('close'/'reopen') to change state. Non-concurrent-safe: it is a write.",
+    description: "Updates one issue and returns the resulting record summary. Any field you omit is left untouched, except `description`, which replaces the whole stored text when supplied — read the current description with gitlab_get_issue first and resend it in full, never a fragment. Use addLabels/removeLabels for incremental label changes, and stateEvent ('close'/'reopen') to change state. Non-concurrent-safe: it is a write.",
     parameters: {
       project: PROJECT_PARAM,
       iid: { type: "number", required: true, description: "Issue iid to update." },
@@ -1004,11 +924,6 @@ function applyUpdateIssueTool(ctx, config) {
 }
 
 function applyAddIssueNoteTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_add_issue_note",
-    order: 134,
-    text: "Use gitlab_add_issue_note to comment on an issue (markdown supported). This token can ADD comments but cannot edit or delete them, so write the final text in one pass."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_add_issue_note",
     description: "Adds a comment (note) to an issue and returns its id and timestamp. Markdown is supported. Editing or deleting an existing comment is not permitted for this token. Non-concurrent-safe: it is a write.",
@@ -1038,14 +953,9 @@ function applyAddIssueNoteTool(ctx, config) {
 }
 
 function applyLinkIssuesTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_link_issues",
-    order: 135,
-    text: "Use gitlab_link_issues to relate one issue to another (relates_to, blocks, is_blocked_by). Links live on the server and are visible in the web UI. This token can create links but cannot delete them, so pick the relation deliberately. Issues may live in different projects when you pass `targetProject`."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_link_issues",
-    description: "Creates a link between two issues. `linkType` is one of relates_to, blocks, or is_blocked_by. Returns both issues' references. Deleting a link is not permitted for this token. Non-concurrent-safe: it is a write.",
+    description: "Creates a link between two issues. `linkType` is one of relates_to, blocks, or is_blocked_by. Returns both issues' references. Deleting a link is not permitted for this token, so pick the relation deliberately; links live on the server and are visible in the web UI. Non-concurrent-safe: it is a write.",
     parameters: {
       project: PROJECT_PARAM,
       iid: { type: "number", required: true, description: "Source issue iid." },
@@ -1082,14 +992,9 @@ function applyLinkIssuesTool(ctx, config) {
 }
 
 function applyUploadFileTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:gitlab_upload_file",
-    order: 136,
-    text: "Use gitlab_upload_file to attach a local image or document to a project, then embed the returned '/uploads/<hash>/<name>' path in an issue description or comment — never a raw branch URL. Uploads belong to the project and survive branch cleanup. This token can upload but not delete an upload, so only upload what should stay."
-  });
   ctx.tools.register(defineTool({
     name: "gitlab_upload_file",
-    description: "Uploads a LOCAL file to a project's upload store and returns its '/uploads/<hash>/<name>' path plus ready-to-paste markdown. Use the returned markdown inside an issue description or note so the attachment belongs to the project rather than a temporary branch. Deleting an upload is not permitted for this token.",
+    description: "Uploads a LOCAL file to a project's upload store and returns its '/uploads/<hash>/<name>' path plus ready-to-paste markdown. Use the returned markdown inside an issue description or note so the attachment belongs to the project rather than a temporary branch. Deleting an upload is not permitted for this token, so only upload a final version. Uploads belong to the project and survive branch cleanup.",
     parameters: {
       project: PROJECT_PARAM,
       filePath: { type: "string", required: true, description: "Absolute path of the local file to upload (image, PDF, archive, ...)." },
