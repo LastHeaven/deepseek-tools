@@ -1,12 +1,13 @@
 {
   "name": "@deepseek-ai/dsh-tool-context7",
-  "description": "Context7 documentation tools for the Web and headless profiles: resolve a library or product name to a Context7-compatible library ID and fetch up-to-date, version-specific docs and code examples, registered in-process against the hosted Context7 API.",
-  "version": "1.0.0",
+  "description": "Context7 documentation tools for the Web and headless profiles: resolve a library or product name to a Context7-compatible library ID and fetch up-to-date, version-specific docs and code examples, registered in-process against the hosted Context7 API. The Web Plugins page configures it, including the API key through the credential store.",
+  "version": "1.1.0",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
@@ -14,6 +15,7 @@
   },
   "files": [
     "lib/index.js",
+    "lib/client.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
@@ -42,6 +44,13 @@
     "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   }
 }

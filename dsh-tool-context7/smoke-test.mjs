@@ -2,7 +2,8 @@
 //
 // Drives the plugin WITHOUT the DSH loader: it builds a fake ctx, runs the
 // exported Schemastery `Config` over a partial config (the loader's step), calls
-// apply(), and then exercises the registered tools against the live Context7 API.
+// apply(), and then exercises the registered tools. The browser half is checked
+// statically, without a DOM.
 //
 //   node smoke-test.mjs                        # offline: manifest + schema + wiring
 //   CONTEXT7_SMOKE_LIVE=1 node smoke-test.mjs  # also hit the Context7 API
@@ -11,7 +12,7 @@
 // The live section is opt-in so the test stays usable offline. The key is read
 // from CONTEXT7_API_KEY in the environment; without it the anonymous tier is
 // used, which is enough for the assertions below but is rate limited.
-import { readFileSync, existsSync, symlinkSync, mkdirSync, rmSync, lstatSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -47,6 +48,17 @@ check("exports the locales", manifest.exports?.["./locale/*.json"] === "./locale
 check("exports the icon", manifest.exports?.["./icon"] === "./icon.svg");
 check("declares engines.dsh", typeof manifest.engines?.dsh === "string", JSON.stringify(manifest.engines));
 
+// The browser half: without these three, the Plugins page never loads the form.
+check("declares a web client half", manifest.dsh?.client?.platform === "web", JSON.stringify(manifest.dsh?.client));
+check("exports the client bundle", manifest.exports?.["./client"] === "./lib/client.js");
+check("files ships the client bundle", (manifest.files ?? []).includes("lib/client.js"));
+check(
+  "client inject names the settings and plugin-manager UI",
+  (manifest.dsh?.client?.inject ?? []).includes("@deepseek-ai/dsh-client-ui-settings") &&
+    (manifest.dsh?.client?.inject ?? []).includes("@deepseek-ai/dsh-client-ui-plugin-manager"),
+  JSON.stringify(manifest.dsh?.client?.inject)
+);
+
 for (const language of ["en", "zh"]) {
   const file = join(HERE, "locale", `${language}.json`);
   check(`locale/${language}.json exists`, existsSync(file));
@@ -66,7 +78,111 @@ check("icon is a well-formed svg", /^<svg[\s>]/.test(icon.trim()) && icon.trim()
 check("icon stays under 256 KiB", Buffer.byteLength(icon) < 262144);
 
 // ---------------------------------------------------------------------------
-// 2. Plugin contract
+// 2. Browser half: registration contract, checked without a DOM
+// ---------------------------------------------------------------------------
+
+// The browser half is a ModuleLoader bundle, not a module: it calls
+// `window.__ModuleLoader__.load({ id, factory })` at load time. Capture that
+// registration and inspect the plugin object the factory returns.
+const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
+{
+  let registration;
+  const fakeWindow = { __ModuleLoader__: { load: (value) => { registration = value; } } };
+  const factory = new Function("window", `${clientSource}\nreturn window.__ModuleLoader__.load;`);
+  factory(fakeWindow);
+  check("client registers a module", typeof registration === "object" && registration !== null);
+  check("client module id is the package name", registration?.id === manifest.name, registration?.id);
+
+  const required = [];
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    useState: (initial) => [initial, () => {}],
+    useEffect: () => {},
+    useId: () => "id",
+  };
+  const plugin = registration?.factory((specifier) => {
+    required.push(specifier);
+    if (specifier === "react") return React;
+    throw new Error(`unexpected require(${specifier})`);
+  });
+
+  check("client returns a plugin", typeof plugin?.apply === "function");
+  check("client requires only react (no Harness Client package)", JSON.stringify(required) === JSON.stringify(["react"]), required.join(", "));
+  check("client injects slots", (plugin?.inject ?? []).includes("slots"), JSON.stringify(plugin?.inject));
+
+  const registrations = [];
+  const dictionaries = [];
+  const effects = [];
+  const ctx = {
+    locale: {
+      register: (ns, dicts) => { dictionaries.push({ ns, dicts }); return () => {}; },
+      bind: (ns) => (key, params) => (params === undefined ? `${ns}.${key}` : `${ns}.${key}:${JSON.stringify(params)}`),
+    },
+    slots: {
+      inject: (owner, callback) => { effects.push(owner); callback(); return () => {}; },
+      register: (options, component) => { registrations.push({ options, component }); return () => {}; },
+    },
+    effect: (callback) => { callback(); return () => {}; },
+    get: () => undefined,
+  };
+  plugin.apply(ctx);
+
+  check("client registers into plugins.row.config", registrations.length === 1 && registrations[0].options.name === "plugins.row.config",
+    registrations.map((entry) => entry.options.name).join(", "));
+  const key = registrations[0]?.options.key;
+  check("row config key is '<package>#<row id>'", key === `${manifest.name}#tool-context7`, key);
+  check("row id matches the bundled patch", /id:\s*tool-context7/.test(patch));
+  check("client registers en and zh dictionaries", dictionaries.length === 1 && dictionaries[0].dicts.en !== undefined && dictionaries[0].dicts.zh !== undefined);
+
+  // Every dictionary key must exist in both languages, or the page renders a raw
+  // key in one locale.
+  const en = dictionaries[0]?.dicts.en ?? {};
+  const zh = dictionaries[0]?.dicts.zh ?? {};
+  const missing = Object.keys(en).filter((entry) => zh[entry] === undefined);
+  check("both dictionaries carry the same keys", missing.length === 0, missing.join(", "));
+  const extras = Object.keys(zh).filter((entry) => en[entry] === undefined);
+  check("neither dictionary has extra keys", extras.length === 0, extras.join(", "));
+
+  // The summary view is what the row's one-liner falls back to; it must render
+  // without a form.
+  const summary = registrations[0]?.component({ t: (label, params) => (params === undefined ? label : `${label}:${JSON.stringify(params)}`), view: "summary" });
+  check("summary view renders without a form", typeof summary === "object" && summary !== null);
+
+  // A row page whose entry projects no volatile field passes no `form`; the page
+  // must say so instead of throwing, because a throwing component blanks the slot.
+  const withoutForm = registrations[0]?.component({ t: (label) => label, view: "page" });
+  check("page without a form renders a fallback", typeof withoutForm === "object" && withoutForm !== null);
+
+  // With a form, the page renders the form controls. Hooks are stubbed above, and
+  // `useId` returns a constant, so this only asserts that rendering does not throw.
+  const form = {
+    state: {
+      status: "ready",
+      value: { apiUrl: "https://context7.mirror/api", apiKeyEnv: "CONTEXT7_MIRROR_KEY", resolveLibraryId: true, queryDocs: false, maxOutputChars: 120000 },
+      base: { apiUrl: "https://context7.com/api", apiKeyEnv: "CONTEXT7_API_KEY", resolveLibraryId: true, queryDocs: true, maxOutputChars: 200000 },
+      user: { apiUrl: "https://context7.mirror/api" },
+      revision: 3,
+      writable: true,
+    },
+    mutate: async () => true,
+  };
+  let page;
+  try {
+    page = registrations[0]?.component({ t: (label) => label, view: "page", form, ctx });
+    check("page with a form renders", typeof page === "object" && page !== null);
+  } catch (error) {
+    check("page with a form renders", false, String(error?.message ?? error));
+  }
+
+  // The page must not import the primitives package; the plan forbids it, and
+  // slot entry crashes are silent otherwise.
+  check("client avoids JSX and TypeScript", !/<[A-Za-z][A-Za-z0-9]*[\s/>]/.test(clientSource.replace(/\/\/.*$/gm, "")), "no JSX in the browser half");
+  check("client imports no Harness Client package", !/require\(["']@deepseek-ai\//.test(clientSource), "no @deepseek-ai require");
+  check("client styles by theme token only", !/:\s*#[0-9a-fA-F]{3,8}\b/.test(clientSource), "no literal hex colors");
+}
+
+// ---------------------------------------------------------------------------
+// 3. Plugin contract
 // ---------------------------------------------------------------------------
 
 // The plugin's `@deepseek-ai/*` peers are NOT dependencies of this package:
@@ -105,7 +221,6 @@ if (process.env.CONTEXT7_SMOKE_PEERS !== "1") {
   const aliasDir = join(HERE, ".smoke-peers");
   mkdirSync(aliasDir, { recursive: true });
   const aliasFile = join(aliasDir, "peers.mjs");
-  const { writeFileSync } = await import("node:fs");
   writeFileSync(aliasFile, PEER_ALIAS, "utf8");
   const result = (await import("node:child_process")).spawnSync(
     process.execPath,
@@ -131,22 +246,38 @@ check("injects tools and systemPrompt", JSON.stringify(inject) === JSON.stringif
 check("declares a default API url", API_BASE_URL === "https://context7.com/api", API_BASE_URL);
 check("declares a default key reference", DEFAULT_API_KEY_ENV === "CONTEXT7_API_KEY", DEFAULT_API_KEY_ENV);
 
-// The loader normalizes config through the schema before apply(); mimic that,
-// including the defaults the bundled patch relies on.
+// The loader normalizes config through the schema before apply(), including the
+// defaults the bundled patch relies on. The result holds live references for the
+// volatile fields, so every assertion below reads through `get()`.
 const config = Config({ apiUrl: process.env.CONTEXT7_API_URL ?? API_BASE_URL, apiKeyEnv: DEFAULT_API_KEY_ENV });
+
+/** Read a config value, whether it arrived volatile or plain. */
+const read = (value) => (value !== null && typeof value === "object" && typeof value.get === "function" ? value.get() : value);
+
 check(
   "schema fills every default",
-  config.resolveLibraryId === true && config.queryDocs === true && config.apiKey === "" && config.timeoutMs > 0 && config.maxOutputChars > 0,
-  JSON.stringify(config)
+  read(config.resolveLibraryId) === true &&
+    read(config.queryDocs) === true &&
+    read(config.apiKey) === "" &&
+    read(config.timeoutMs) > 0 &&
+    read(config.maxOutputChars) > 0,
+  JSON.stringify({ apiUrl: read(config.apiUrl), timeoutMs: read(config.timeoutMs) })
 );
+
+// The page can only edit volatile fields — that is the whole mechanism, so assert
+// both directions: the editable ones project, and the secret/timeout do not.
+const volatileFields = Object.entries(Config.toJSON().refs).filter(([, node]) => node?.meta?.volatile === true).length;
+check("schema declares volatile fields for the page", volatileFields >= 5, `${volatileFields} volatile nodes`);
+check("apiKey stays out of the editable projection", read(config.apiKey) === "" && typeof config.apiKey === "string", typeof config.apiKey);
+check("timeoutMs stays plain (applied on reload)", typeof config.timeoutMs === "number", typeof config.timeoutMs);
 
 function makeCtx() {
   const registered = [];
   const sections = [];
   const ctx = {
     tools: {
-      register(def) {
-        registered.push(def);
+      register(def, options) {
+        registered.push({ def, options });
         return () => {};
       }
     },
@@ -168,21 +299,51 @@ const { ctx, registered, sections } = makeCtx();
 apply(ctx, config);
 
 const expected = ["context7_resolve_library_id", "context7_query_docs"];
-const names = registered.map((tool) => tool.name);
+const names = registered.map(({ def }) => def.name);
 check("registers both tools", JSON.stringify(names) === JSON.stringify(expected), names.join(", "));
-check("every tool has a description", registered.every((tool) => typeof tool.description === "string" && tool.description.length > 20));
-check("every tool declares a timeout", registered.every((tool) => Number.isFinite(tool.timeoutMs) && tool.timeoutMs > 0));
+check("every tool has a description", registered.every(({ def }) => typeof def.description === "string" && def.description.length > 20));
+check("every tool declares a timeout", registered.every(({ def }) => Number.isFinite(def.timeoutMs) && def.timeoutMs > 0));
+check("every tool carries a step-time switch", registered.every(({ options }) => typeof options?.when === "function"));
 check("prompt sections are named per tool", sections.every((section) => section.name.startsWith("tool:context7_")), sections.map((s) => s.name).join(", "));
 check("prompt sections take the web-fetch slot order", sections.every((section) => section.order === TOOL_WEB_FETCH_ORDER), sections.map((s) => `${s.name}@${s.order}`).join(", "));
 
-// Per-tool switches are the second half of "enable/disable": a deployment can
-// keep the bundle mounted and still remove one declaration from the schema list.
+// The prompt text is a function, so a tool switched off on the page also drops
+// its guidance from the next assembly (assembly discards empty sections).
+check("prompt text is resolved per assembly", sections.every((section) => typeof section.text === "function"));
+const texts = sections.map((section) => section.text());
+check("enabled tools contribute guidance", texts.every((text) => typeof text === "string" && text.length > 20), texts.map((text) => text.length).join(", "));
+
+// Per-tool switches are the second half of "enable/disable": the bundle stays
+// mounted and one declaration leaves the schema list. They are step-time `when`
+// conditions now, so flipping the live reference must be enough — no rebuild.
 {
+  const { ctx: partialCtx, registered: partialRegistered, sections: partialSections } = makeCtx();
   const partial = Config({ resolveLibraryId: false });
-  const { ctx: partialCtx, registered: partialRegistered } = makeCtx();
   apply(partialCtx, partial);
-  const partialNames = partialRegistered.map((tool) => tool.name);
-  check("per-tool switches drop those tools", JSON.stringify(partialNames) === JSON.stringify(["context7_query_docs"]), partialNames.join(", "));
+  const switched = partialRegistered.map(({ def, options }) => ({ name: def.name, at: options.when }));
+  const resolveEntry = switched.find((entry) => entry.name === "context7_resolve_library_id");
+  const docsEntry = switched.find((entry) => entry.name === "context7_query_docs");
+  check("both tools stay registered when one is switched off", switched.length === 2, switched.map((entry) => entry.name).join(", "));
+  check("switched-off tool reports inactive per step", resolveEntry?.at({ agent: { id: "a" }, signal: AbortSignal.abort() }) === false);
+  check("switched-on tool reports active per step", docsEntry?.at({ agent: { id: "a" }, signal: AbortSignal.abort() }) === true);
+  const offText = partialSections.find((section) => section.name === "tool:context7_resolve_library_id");
+  check("switched-off tool drops its prompt text", offText?.text() === "");
+  const onText = partialSections.find((section) => section.name === "tool:context7_query_docs");
+  check("switched-on tool keeps its prompt text", typeof onText?.text() === "string" && onText.text().length > 20);
+}
+
+// A live reference is updated in place by the settings write, so a value changed
+// after apply() must be visible to the very next call without a rebuild. The
+// harness commits through cosmokit's `updateVolatile`, which is what this uses.
+{
+  const cosmokit = await import("@deepseek-ai/cosmokit");
+  const { ctx: liveCtx, registered: liveRegistered } = makeCtx();
+  const live = Config({});
+  apply(liveCtx, live);
+  const before = liveRegistered[0].options.when({ agent: { id: "a" }, signal: AbortSignal.abort() });
+  cosmokit.updateVolatile(live.resolveLibraryId, cosmokit.createVolatile(false));
+  const after = liveRegistered[0].options.when({ agent: { id: "a" }, signal: AbortSignal.abort() });
+  check("a live reference change reaches the switch", before === true && after === false, `${before} -> ${after}`);
 }
 
 // A blank API URL must fail at mount, with the fix in the message. The schema
@@ -193,7 +354,7 @@ check("prompt sections take the web-fetch slot order", sections.every((section) 
   const { ctx: blankCtx } = makeCtx();
   let message;
   try {
-    apply(blankCtx, { ...config, apiUrl: "  " });
+    apply(blankCtx, Config({ apiUrl: "  " }));
   } catch (error) {
     message = String(error.message);
   }
@@ -217,12 +378,45 @@ check("prompt sections take the web-fetch slot order", sections.every((section) 
   try {
     const { ctx: seamToolCtx, registered: seamTools } = makeCtx();
     seamToolCtx.get = seamCtx.get;
-    apply(seamToolCtx, config);
-    await seamTools[0].execute({ query: "react", libraryName: "React" }, { signal: AbortSignal.timeout(5000) });
+    apply(seamToolCtx, Config({}));
+    await seamTools[0].def.execute({ query: "react", libraryName: "React" }, { signal: AbortSignal.timeout(5000) });
   } finally {
     globalThis.fetch = originalFetch;
   }
   check("credential store key becomes a bearer token", seen[0] === "Bearer ctx7sk-from-store", String(seen[0]));
+}
+
+// The same seam, after the page renames the reference: the next call must resolve
+// the new name through the store instead of the old one.
+{
+  const seenRefs = [];
+  const store = { CONTEXT7_API_KEY: "ctx7sk-old", CONTEXT7_MIRROR_KEY: "ctx7sk-new" };
+  const renameCtx = {
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    get: (service) => (service === "credentials" ? {
+      resolve: async (ref) => { seenRefs.push(ref); return store[ref] === undefined ? undefined : { value: store[ref] }; }
+    } : undefined)
+  };
+  const tokens = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    tokens.push(init?.headers?.authorization);
+    return { ok: true, status: 200, json: async () => ({ results: [] }), text: async () => "" };
+  };
+  try {
+    const cosmokit = await import("@deepseek-ai/cosmokit");
+    const live = Config({});
+    const { ctx: renameToolCtx, registered: renameTools } = makeCtx();
+    renameToolCtx.get = renameCtx.get;
+    apply(renameToolCtx, live);
+    await renameTools[0].def.execute({ query: "react", libraryName: "React" }, { signal: AbortSignal.timeout(5000) });
+    cosmokit.updateVolatile(live.apiKeyEnv, cosmokit.createVolatile("CONTEXT7_MIRROR_KEY"));
+    await renameTools[0].def.execute({ query: "react", libraryName: "React" }, { signal: AbortSignal.timeout(5000) });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("a live reference rename re-resolves the credential", tokens[0] === "Bearer ctx7sk-old" && tokens[1] === "Bearer ctx7sk-new", tokens.join(" -> "));
 }
 
 if (!LIVE) {
@@ -232,11 +426,11 @@ if (!LIVE) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Live API
+// 4. Live API
 // ---------------------------------------------------------------------------
 
 const signal = AbortSignal.timeout(60000);
-const byName = Object.fromEntries(registered.map((tool) => [tool.name, tool]));
+const byName = Object.fromEntries(registered.map(({ def }) => [def.name, def]));
 
 async function run(label, toolName, args, expect = () => true) {
   const def = byName[toolName];

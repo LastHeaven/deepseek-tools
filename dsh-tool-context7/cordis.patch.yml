@@ -22,17 +22,31 @@
 #   GET /v2/libs/search?query=<q>&libraryName=<name>   library search
 #   GET /v2/context?query=<q>&libraryId=<id>            docs for one library
 #
+# ── EDIT THE VALUES ON THE PLUGINS PAGE ──────────────────────────────────────
+# apiUrl, apiKeyEnv, resolveLibraryId, queryDocs and maxOutputChars are all
+# `.volatile()`, so the row's own configuration page on the Plugins page edits
+# them and they take effect on the next tool call without a reload. The values
+# below are the bundle's defaults: the page writes only what you change, in the
+# profile's cordis.patch.yml, so this file keeps matching the shipped defaults.
+#
+# timeoutMs is the exception. It is baked into each tool declaration, so editing
+# it here takes effect when the plugin is rebuilt. `apiKey` is likewise
+# patch-only, on purpose — see below.
+#
 # ── API KEY: DO NOT PUT IT HERE ──────────────────────────────────────────────
 # No key is configured. The plugin resolves the credential reference named by
 # `apiKeyEnv` (default `CONTEXT7_API_KEY`) through the harness credential store
-# at call time, falling back to the same-named environment variable. An unset
-# key still works on the anonymous tier, just with lower rate limits. `apiKey`
-# exists in the schema for throwaway deployments only.
+# at call time, falling back to the same-named environment variable. Paste the
+# key on the Plugins page, which writes it to $DSH_HOME/.credentials.yaml through
+# the credentials service, so the secret never enters this file or a response.
+# An unset key still works on the anonymous tier, just with lower rate limits.
+# `apiKey` exists in the schema for throwaway deployments only.
 #
 # ── PER-TOOL SWITCHES ────────────────────────────────────────────────────────
-# The two booleans default to true. Turn one off to keep a single tool out of
-# the model's schema list without disabling the whole bundle; turning a tool off
-# also drops its system-prompt section and can free request-prefix cache space.
+# The two booleans default to true. Turn one off on the Plugins page (or here)
+# to keep a single tool out of the model's schema list without disabling the
+# whole bundle; turning a tool off also drops its system-prompt section and can
+# free request-prefix cache space. Neither needs a reload.
 - insert:
     - id: tool-context7
       name: '@deepseek-ai/dsh-tool-context7'

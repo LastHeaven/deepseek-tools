@@ -15,7 +15,7 @@ It ships as a **bundle**: `package.json` declares `dsh.bundle.patch`, the bundle
 `cordis.patch.yml` mounts the single `tool-context7` row, and the package
 carries its own locales and icon. One `dsh plugin --profile <name> add` installs
 and activates it; the profile's Plugins page then turns it on and off like any
-other plugin.
+other plugin, and edits its parameters on the row's own configuration page.
 
 ```yaml
 - id: tool-context7
@@ -51,26 +51,48 @@ one readers of the stock Context7 tools already expect.
 
 ## Configuration
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `apiUrl` | `https://context7.com/api` | Context7 REST API base URL. Change only for a mirror or local gateway that proxies the two endpoints above. A blank value fails at mount with the fix in the message |
-| `apiKey` | `""` | Literal bearer token; wins over `apiKeyEnv` when set. Prefer leaving it empty |
-| `apiKeyEnv` | `CONTEXT7_API_KEY` | Credential reference resolved through the harness credential store, then the process environment. The anonymous tier needs neither |
-| `resolveLibraryId` | `true` | Register `context7_resolve_library_id` |
-| `queryDocs` | `true` | Register `context7_query_docs` |
-| `timeoutMs` | `60000` | Cooperative per-call budget attached to every tool |
-| `maxOutputChars` | `200000` | Hard cap on each tool's rendered output |
+Open **Plugins** in the Web sidebar, expand this bundle, and select the row's
+**Configure** control. The page stages edits and writes them on Save; nothing is
+written while you type, and leaving the page drops the drafts.
 
-**The key is not in this file.** It lives in `$DSH_HOME/.credentials.yaml` under
-`refs: CONTEXT7_API_KEY: …` and is resolved at call time through
+| Field | Default | Editable on the page | Meaning |
+| --- | --- | --- | --- |
+| `apiUrl` | `https://context7.com/api` | ✅ live | Context7 REST API base URL. Change only for a mirror or local gateway that proxies the two endpoints above. A blank value fails at mount with the fix in the message |
+| `apiKeyEnv` | `CONTEXT7_API_KEY` | ✅ live | Credential reference resolved through the harness credential store, then the process environment. The anonymous tier needs neither |
+| `resolveLibraryId` | `true` | ✅ live | Expose `context7_resolve_library_id` |
+| `queryDocs` | `true` | ✅ live | Expose `context7_query_docs` |
+| `maxOutputChars` | `200000` | ✅ live | Hard cap on each tool's rendered output |
+| `apiKey` | `""` | ❌ patch only | Literal bearer token; wins over `apiKeyEnv` when set. Prefer leaving it empty |
+| `timeoutMs` | `60000` | ❌ patch only | Cooperative per-call budget attached to every tool |
+
+**Why two fields stay out of the page.** The settings surface projects only
+fields a plugin declares `.volatile()`, and a volatile field can change without
+rebuilding the plugin. `timeoutMs` is baked into each tool declaration, so a new
+value only applies when the definitions are rebuilt; `apiKey` is excluded so a
+literal secret never rides the configuration wire — the page edits `apiKeyEnv`
+instead and stores the secret itself. Edit both in `cordis.patch.yml`.
+
+**The key is not in this file.** Paste it into the page's **New key** field. That
+writes it to `$DSH_HOME/.credentials.yaml` under `refs: CONTEXT7_API_KEY: …`
+through the credentials service, so the value crosses the wire in one direction
+only and never enters the profile patch. The tools resolve it at call time via
 `ctx.get("credentials")` — a soft dependency, so a composition without the store
-falls back to the `CONTEXT7_API_KEY` environment variable. Rotating the key
-needs no restart, because the store's own watcher refreshes its snapshot.
+falls back to the `CONTEXT7_API_KEY` environment variable. Rotating the key needs
+no restart, because the store's own watcher refreshes its snapshot.
 
 An unset key is not an error: the hosted API serves anonymous requests with
 lower rate limits, and the plugin simply omits the `Authorization` header. A
 `429` then surfaces the "create a free API key" hint; with a key configured it
 surfaces the plan-upgrade hint instead.
+
+### Where a page edit lands
+
+The page writes through the profile's config editor, so an edit becomes an
+override row in the profile's `cordis.patch.yml` — the bundle's own
+`cordis.patch.yml` is never touched, and it keeps matching the shipped defaults.
+A field set back to the bundle's value is written as a removal, so the profile
+patch keeps recording only real departures. **Reset** beside an overridden field
+clears that override immediately, without waiting for Save.
 
 ### Per-tool switches vs. the bundle switch
 
@@ -79,11 +101,14 @@ Two independent ways to remove capacity without forking the package:
 - **Turn the bundle off** (Plugins page, `plugin_manager`, or a
   `disabled: true` override row) — unloads the fiber, so both tools and their
   prompt sections disappear from the next request.
-- **Turn one tool off** in `config` — keeps the fiber and drops just that tool's
-  declaration and prompt section. Cheaper when a deployment wants doc lookups but
-  wants to keep the model from searching the index, for example.
+- **Turn one tool off** on the configuration page — the plugin stays mounted and
+  the tool drops out of the model's schema list for the next step, along with its
+  system-prompt section. Cheaper when a deployment wants doc lookups but wants to
+  keep the model from searching the index, for example.
 
-Both are effect-based: nothing is left registered behind.
+Both are effect-based: nothing is left registered behind. The per-tool switch is a
+step-time condition (`tools.register(..., { when })`) reading a live reference, so
+flipping it needs no reload — the very next request sees it.
 
 ---
 
@@ -107,10 +132,10 @@ dsh plugin --profile web add @deepseek-ai/dsh-tool-context7
 
 ### Store the API key (optional)
 
-```powershell
-# through the harness credential store, or any editor on the file
-# $DSH_HOME/.credentials.yaml -> refs: CONTEXT7_API_KEY: ctx7sk-…
-```
+Open the Plugins page → this bundle → the row's **Configure** page → **New key**.
+The page writes it through the credentials service, so it lands in
+`$DSH_HOME/.credentials.yaml` under `refs:` and never in a patch file. Editing
+that file directly works too.
 
 Verify composition before booting:
 
@@ -152,14 +177,42 @@ Context7 plugin apart from other tools in the list.
 
 ---
 
+## How the configuration page works
+
+The package carries a browser half (`lib/client.js`) beside the Host half. It
+registers into the Plugins page's `plugins.row.config` slot under the key
+`@deepseek-ai/dsh-tool-context7#tool-context7` — the bundle's package name plus
+the row id its patch declares, which is how the page keys a row's own form. With
+that entry present, the row gains a **Configure** control; without it, the row is
+read-only.
+
+Three pieces have to line up, and the smoke test asserts all three:
+
+1. `package.json` declares `dsh.client` with `platform: web`, exports
+   `./client`, and ships `lib/client.js` in `files`. Without this the browser
+   never loads the bundle.
+2. The Host half declares the page-editable fields `.volatile()`. That is what
+   makes `dsh-settings` project them, and what hands `apply()` live references
+   instead of snapshots. Non-volatile fields simply do not appear.
+3. `lib/client.js` registers the slot with `locale: "toolContext7"` and declares
+   its own `en`/`zh` dictionaries.
+
+The form is plain JavaScript and does not import `@deepseek-ai/dsh-client-ui-primitives`:
+all elements are built with `React.createElement`, and every style resolves to a
+`--dsw-alias-*` theme token, so the page follows light/dark switching and a
+renamed token degrades appearance without breaking the slot.
+
+---
+
 ## Smoke test
 
 ```powershell
 cd D:/git/deepseek-tools/dsh-tool-context7
 
-# Offline: manifest/bundle wiring, localized metadata, schema defaults,
-# tool registration, prompt-section order, per-tool switches, mount guard,
-# and credential-seam precedence (fetch is stubbed for that last one)
+# Offline: manifest/bundle wiring, localized metadata, the browser-half
+# registration contract, schema defaults, tool registration, prompt-section
+# order, per-tool switches, mount guard, live-reference updates, and
+# credential-seam precedence (fetch is stubbed for the last two)
 node smoke-test.mjs
 
 # Also drive both tools against the Context7 API
@@ -174,10 +227,14 @@ the `@deepseek-ai/*` peers resolve from a profile, not from this checkout. It
 falls back to the checkout when nothing is installed. Overrides: `DSH_HOME`,
 `CONTEXT7_PLUGIN_PROFILE`, `CONTEXT7_API_URL`, and `CONTEXT7_PLUGIN=<file:///…/lib/index.js>`.
 
-The offline section is the packaging contract — it fails if `files` stops
-shipping `cordis.patch.yml`, the locales or the icon, if the patch row stops
-naming the package, if a schema default disappears, if a per-tool switch stops
-removing its tool, or if the credential store stops outranking the environment.
+The offline section is the packaging contract. It fails if `files` stops shipping
+`cordis.patch.yml`, the locales, the icon or `lib/client.js`; if `dsh.client`
+disappears or the client half starts importing a Harness Client package; if the
+slot key stops matching the patch's row id; if the two dictionaries drift apart;
+if a schema default disappears; if a per-tool switch stops hiding its tool; or if
+the credential store stops outranking the environment. The browser half is checked
+by capturing its `window.__ModuleLoader__.load` registration and rendering both
+views with a stubbed React, so it needs no DOM.
 
 ---
 
@@ -193,3 +250,11 @@ removing its tool, or if the credential store stops outranking the environment.
 - **`apiUrl` cannot be verified at mount.** The default is the hosted service, so
   only a blanked value is rejected eagerly; a wrong mirror surfaces on the first
   call.
+- **`timeoutMs` needs a reload.** It is baked into each tool declaration, so the
+  page cannot edit it and a patch edit applies when the plugin is rebuilt.
+- **The page needs the settings composition.** It renders only where the profile
+  mounts `config-editor` and `settings` and serves the entry as a volatile form;
+  a headless profile keeps the plugin fully working but shows no page.
+- **Rendered appearance is unverified here.** The registration, slot key,
+  dictionaries, and both views were checked programmatically; the layout in a live
+  browser was not, since this session has no browser control.

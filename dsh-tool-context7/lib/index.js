@@ -13,6 +13,10 @@
 // one step. Everything registered here is fiber-scoped, so the profile's
 // Plugins page (or a `disabled: true` override row) unloads it cleanly.
 //
+// The same package also ships a browser half (`lib/client.js`) that registers
+// this row's configuration page on the Plugins page, so the parameters below are
+// edited in the UI instead of by hand in `cordis.patch.yml`.
+//
 // Verified REST endpoints (base url https://context7.com/api):
 //   GET /v2/libs/search?query=<q>&libraryName=<name>   -> library search
 //   GET /v2/context?query=<q>&libraryId=<id>            -> docs for a library
@@ -40,19 +44,62 @@ const TOOL_WEB_FETCH_ORDER = 2100;
 /**
  * Plugin config, resolved by the loader (schemastery defaults applied).
  *
+ * Every field the Plugins page edits is `.volatile()`. That is what makes the
+ * page work at all: the settings service projects only volatile fields into a
+ * form, and the loader hands a volatile field to `apply()` as a live reference
+ * instead of a snapshot. The page writes through the profile's config editor,
+ * the reference is updated in place, and the next tool call reads the new value
+ * without restarting the plugin.
+ *
+ * Two fields stay ordinary, and so appear in `cordis.patch.yml` only:
+ *
+ * - `apiKey` is the patch-file escape hatch for a deployment with no credential
+ *   store. Keeping it out of the volatile projection keeps a literal secret off
+ *   the configuration wire entirely; the page edits `apiKeyEnv` and writes the
+ *   secret itself through the credential store.
+ * - `timeoutMs` is baked into each `defineTool` declaration, so a new value only
+ *   takes effect when the definitions are rebuilt.
+ *
  * `apiUrl` mirrors the bundled patch rather than being schema-required: the
  * bundle has to stay mountable with a placeholder, and the loud failure for a
- * blanked URL lives in `apply()` where it names the fix. See the README.
+ * blanked URL lives in `apply()` and in every call where it names the fix. See
+ * the README.
  */
 const Config = z.object({
-  apiUrl: z.string().default(API_BASE_URL),
+  apiUrl: z.string().default(API_BASE_URL).volatile(),
   apiKey: z.string().default(""),
-  apiKeyEnv: z.string().default(DEFAULT_API_KEY_ENV),
-  resolveLibraryId: z.boolean().default(true),
-  queryDocs: z.boolean().default(true),
-  timeoutMs: z.number().default(DEFAULT_TIMEOUT_MS),
-  maxOutputChars: z.number().default(200000)
+  apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV).volatile(),
+  resolveLibraryId: z.boolean().default(true).volatile(),
+  queryDocs: z.boolean().default(true).volatile(),
+  timeoutMs: z.number().step(1).min(1).default(DEFAULT_TIMEOUT_MS),
+  maxOutputChars: z.number().step(1).min(1).default(200000).volatile()
 });
+
+/**
+ * Read one config value through its live reference.
+ *
+ * A `.volatile()` field arrives as `{ get() }` and an ordinary field as the
+ * value itself, so every read goes through here. Reading on use — instead of
+ * capturing a plain object once in `apply()` — is what makes a page edit reach
+ * the very next call.
+ */
+function unwrap(value) {
+  if (value !== null && typeof value === "object" && typeof value.get === "function") return value.get();
+  return value;
+}
+
+/** Flatten the config, volatile or not, into the plain values used per request. */
+function readConfig(config) {
+  return {
+    apiUrl: unwrap(config.apiUrl),
+    apiKey: unwrap(config.apiKey),
+    apiKeyEnv: unwrap(config.apiKeyEnv),
+    resolveLibraryId: unwrap(config.resolveLibraryId),
+    queryDocs: unwrap(config.queryDocs),
+    timeoutMs: unwrap(config.timeoutMs),
+    maxOutputChars: unwrap(config.maxOutputChars)
+  };
+}
 
 function assertPositiveInteger(label, value) {
   if (!Number.isInteger(value) || value < 1) throw new Error(`tool-context7: ${label} must be a positive integer`);
@@ -99,8 +146,8 @@ async function resolveApiKey(ctx, config) {
 function baseUrl(config) {
   const raw = String(config.apiUrl ?? "").trim();
   // `apiUrl` carries a default, so this only fires for an explicitly blanked
-  // value — a plausible hand-edit. Fail with the fix instead of fetching
-  // "undefined/v2/libs/search".
+  // value — a plausible hand-edit or a cleared page field. Fail with the fix
+  // instead of fetching "undefined/v2/libs/search".
   if (!raw) {
     throw new Error(
       "tool-context7: `apiUrl` is empty. Set it to the Context7 API base URL, e.g. https://context7.com/api."
@@ -148,6 +195,15 @@ function truncate(text, max) {
   return s.slice(0, max) + `\n\n(Content truncated at ${max} characters.)`;
 }
 
+/** Validate the per-call output budget, which the page can change at any time. */
+function outputBudget(config) {
+  const max = config.maxOutputChars;
+  if (!Number.isInteger(max) || max < 1) {
+    throw new Error("tool-context7: `maxOutputChars` must be a positive integer. Set it on the plugin's configuration page.");
+  }
+  return max;
+}
+
 function formatSearch(data) {
   const results = Array.isArray(data?.results) ? data.results : [];
   if (!results.length) return data?.error || "No libraries found matching the provided name.";
@@ -178,6 +234,9 @@ function formatSearch(data) {
  * they inherit that slot's order instead of a hard-coded number: the lookup is
  * tolerant of a composition whose prompt service has no accessor, and falls
  * back to the numeric slot the harness reserves for it.
+ *
+ * `text` is a function so a tool switched off on the configuration page also
+ * withdraws its guidance: an empty string is dropped by assembly.
  */
 function promptSection(ctx, sectionName, text) {
   const source = ctx.systemPrompt;
@@ -203,9 +262,22 @@ function stringOutput() {
   };
 }
 
+/**
+ * One tool's step-time switch.
+ *
+ * The page can toggle a tool without remounting the plugin, so the decision is
+ * an activation condition the executor evaluates per step rather than a branch
+ * in `apply()`: `when` false removes the tool from both the declaration list
+ * and dispatch.
+ */
+function enabledWhen(config, field) {
+  return () => readConfig(config)[field] !== false;
+}
+
 function applyResolveLibraryIdTool(ctx, config) {
   promptSection(ctx, "tool:context7_resolve_library_id",
-    "Use the context7_resolve_library_id tool to map a library or product name to a Context7-compatible library ID before querying docs, unless the user already gave an ID in /org/project or /org/project/version form. Pick the match with the best name/reputation/snippet coverage, and do not call it more than 3 times per question.");
+    () => (readConfig(config).resolveLibraryId === false ? "" :
+      "Use the context7_resolve_library_id tool to map a library or product name to a Context7-compatible library ID before querying docs, unless the user already gave an ID in /org/project or /org/project/version form. Pick the match with the best name/reputation/snippet coverage, and do not call it more than 3 times per question."));
   ctx.tools.register(defineTool({
     name: "context7_resolve_library_id",
     description: "Resolves a package/product name to a Context7-compatible library ID and returns matching libraries. Call this before context7_query_docs unless the user explicitly provides a library ID in the format '/org/project' or '/org/project/version'. Each result includes the library ID, name, description, code-snippet count, source reputation, benchmark score, and available versions.",
@@ -214,21 +286,23 @@ function applyResolveLibraryIdTool(ctx, config) {
       libraryName: { type: "string", required: true, description: "Library name to search for, with proper punctuation (e.g. 'Next.js' not 'nextjs', 'Customer.io' not 'customerio')." }
     },
     output: stringOutput(),
-    timeoutMs: config.timeoutMs,
+    timeoutMs: readConfig(config).timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
+      const settings = readConfig(config);
       const params = new URLSearchParams({ query: args.query, libraryName: args.libraryName });
-      const res = await getJson(ctx, config, `/v2/libs/search?${params.toString()}`, exec.signal);
+      const res = await getJson(ctx, settings, `/v2/libs/search?${params.toString()}`, exec.signal);
       const data = await res.json();
-      return truncate(formatSearch(data), config.maxOutputChars);
+      return truncate(formatSearch(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.libraryName, kind: "context7-resolve", rawInput: args.libraryName })
-  }));
+  }), { when: enabledWhen(config, "resolveLibraryId") });
 }
 
 function applyQueryDocsTool(ctx, config) {
   promptSection(ctx, "tool:context7_query_docs",
-    "Use the context7_query_docs tool to fetch up-to-date, version-specific documentation and code examples for a library. Call context7_resolve_library_id first to get the exact ID, unless the user gave one. Keep each query to one concept, and do not call it more than 3 times per question.");
+    () => (readConfig(config).queryDocs === false ? "" :
+      "Use the context7_query_docs tool to fetch up-to-date, version-specific documentation and code examples for a library. Call context7_resolve_library_id first to get the exact ID, unless the user gave one. Keep each query to one concept, and do not call it more than 3 times per question."));
   ctx.tools.register(defineTool({
     name: "context7_query_docs",
     description: "Retrieves and queries up-to-date documentation and code examples from Context7 for any programming library or framework. Requires an exact Context7-compatible library ID (e.g. '/mongodb/docs', '/vercel/next.js', '/supabase/supabase', '/vercel/next.js/v14.3.0-canary.87') from context7_resolve_library_id or the user. Scope the query to a single concept.",
@@ -237,19 +311,20 @@ function applyQueryDocsTool(ctx, config) {
       query: { type: "string", required: true, description: "What to look up, scoped to one concept (e.g. 'How to set up authentication with JWT in Express.js'). Avoid secrets or credentials." }
     },
     output: stringOutput(),
-    timeoutMs: config.timeoutMs,
+    timeoutMs: readConfig(config).timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
+      const settings = readConfig(config);
       const params = new URLSearchParams({ query: args.query, libraryId: args.libraryId });
-      const res = await getJson(ctx, config, `/v2/context?${params.toString()}`, exec.signal);
+      const res = await getJson(ctx, settings, `/v2/context?${params.toString()}`, exec.signal);
       const text = await res.text();
       if (!text) {
         return "Documentation not found or not finalized for this library. This might have happened because you used an invalid Context7-compatible library ID. To get a valid Context7-compatible library ID, use context7_resolve_library_id with the package name you wish to retrieve documentation for.";
       }
-      return truncate(text, config.maxOutputChars);
+      return truncate(text, outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.libraryId, kind: "context7-docs", rawInput: args.libraryId })
-  }));
+  }), { when: enabledWhen(config, "queryDocs") });
 }
 
 // ---------------------------------------------------------------------------
@@ -257,24 +332,38 @@ function applyQueryDocsTool(ctx, config) {
 // ---------------------------------------------------------------------------
 
 /**
- * Register the enabled Context7 tools.
+ * Register the Context7 tools.
  *
  * Registration is effect-based: disposing this plugin's fiber (turning the row
  * off on the Plugins page, `disabled: true`, or HMR replacing it) unregisters
  * every tool and prompt section, so no manual teardown is needed and no stale
  * tool declaration survives into the next request.
+ *
+ * Both tools are always registered; the per-tool switches are step-time `when`
+ * conditions, and their prompt text is resolved per assembly. A page edit
+ * therefore takes effect on the next request instead of waiting for a reload.
  */
 function apply(ctx, config) {
-  assertPositiveInteger("timeoutMs", config.timeoutMs);
-  assertPositiveInteger("maxOutputChars", config.maxOutputChars);
+  const initial = readConfig(config);
+  assertPositiveInteger("timeoutMs", initial.timeoutMs);
 
   // Validate the URL at mount, not at the first model call: a blanked
   // deployment must fail where the fix is obvious (startup log) instead of
-  // surfacing as a confusing tool error mid-conversation.
-  baseUrl(config);
+  // surfacing as a confusing tool error mid-conversation. A page edit that
+  // blanks it is caught per call by `baseUrl`.
+  baseUrl(initial);
 
-  if (config.resolveLibraryId) applyResolveLibraryIdTool(ctx, config);
-  if (config.queryDocs) applyQueryDocsTool(ctx, config);
+  applyResolveLibraryIdTool(ctx, config);
+  applyQueryDocsTool(ctx, config);
 }
 
-export { API_BASE_URL, Config, DEFAULT_API_KEY_ENV, DEFAULT_TIMEOUT_MS, TOOL_WEB_FETCH_ORDER, apply, inject, name };
+export {
+  API_BASE_URL,
+  Config,
+  DEFAULT_API_KEY_ENV,
+  DEFAULT_TIMEOUT_MS,
+  TOOL_WEB_FETCH_ORDER,
+  apply,
+  inject,
+  name
+};
