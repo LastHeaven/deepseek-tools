@@ -1,20 +1,47 @@
 {
   "name": "@deepseek-ai/dsh-tool-context7",
-  "description": "Model-facing Context7 documentation tools (resolve-library-id, query-docs) as a native Cordis plugin calling the Context7 REST API directly",
-  "version": "0.1.0",
+  "description": "Context7 documentation tools for the Web and headless profiles: resolve a library or product name to a Context7-compatible library ID and fetch up-to-date, version-specific docs and code examples, registered in-process against the hosted Context7 API.",
+  "version": "1.0.0",
+  "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "files": [
-    "lib/index.js"
+    "lib/index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
   ],
   "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "cordis",
+    "context7",
+    "documentation",
+    "docs-search"
+  ],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/schemastery": "*",
-    "@deepseek-ai/dsh-tools": "*"
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }

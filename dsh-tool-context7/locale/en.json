@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Context7 documentation",
+    "description": "Connects an Agent to Context7 documentation through a native plugin: resolve a library or product name to a Context7-compatible library ID, then fetch up-to-date, version-specific docs and code examples for it. Works anonymously at the hosted API; add a CONTEXT7_API_KEY credential for higher rate limits. The key stays out of the config."
+  }
+}

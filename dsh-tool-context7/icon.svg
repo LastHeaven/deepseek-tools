@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 74 75" role="img" aria-label="Context7 documentation">
+  <rect width="74" height="75" fill="#047857"/>
+  <!-- Four sevens in a 2x2 pinwheel: the top row is upright, the bottom row is the
+       same glyph turned over, and the right column mirrors the left. All geometry
+       is derived from the source bitmap: rows 14-17 are the bar, the leg runs from
+       y=18 to y=34 and drifts 6px (uniform 5px wide, never tapered), the horizontal
+       mirror axis is x=37 and the vertical one is y=37 (so y' = 74-y, x' = 74-x).
+       Each glyph is ONE closed outline, so the bar and its leg share an edge. -->
+  <g fill="#ffffff">
+    <path d="M17 14H31V18H22L28 34H23L17 18Z"/>
+    <path d="M57 14H43V18H52L46 34H51L57 18Z"/>
+    <path d="M17 60H31V56H22L28 40H23L17 56Z"/>
+    <path d="M57 60H43V56H52L46 40H51L57 56Z"/>
+  </g>
+</svg>

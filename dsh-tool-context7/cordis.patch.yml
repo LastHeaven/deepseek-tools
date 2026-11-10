@@ -1,0 +1,49 @@
+# Context7 docs bundle for DSH.
+#
+# Mounts ONE row: the native `tool-context7` plugin. It registers the
+# context7_* tools in-process through the `tools` registry — no MCP server, no
+# stdio bridge, and no child process, which is what the older `mcp-context7`
+# MCP client entry used to pay for.
+#
+# ── INSTALL / ENABLE / DISABLE ───────────────────────────────────────────────
+# `dsh plugin --profile <name> add <path-or-package>` installs this bundle and
+# activates it in the same step. After that the row below is a normal profile
+# entry: turn it off with the Plugins page (sidebar → Plugins), with
+# `plugin_manager`, or by adding `disabled: true` to an override row of the same
+# `id` in the profile's own cordis.patch.yml. Nothing else has to change —
+# turning it off removes the context7_* tool declarations from the next request
+# and keeps every setting here for the next enable.
+#
+# ── API URL ──────────────────────────────────────────────────────────────────
+# `apiUrl` defaults to the hosted service at https://context7.com/api and does
+# not normally need to change. Point it at a mirror or a local gateway only if
+# your deployment proxies the two endpoints this plugin calls:
+#
+#   GET /v2/libs/search?query=<q>&libraryName=<name>   library search
+#   GET /v2/context?query=<q>&libraryId=<id>            docs for one library
+#
+# ── API KEY: DO NOT PUT IT HERE ──────────────────────────────────────────────
+# No key is configured. The plugin resolves the credential reference named by
+# `apiKeyEnv` (default `CONTEXT7_API_KEY`) through the harness credential store
+# at call time, falling back to the same-named environment variable. An unset
+# key still works on the anonymous tier, just with lower rate limits. `apiKey`
+# exists in the schema for throwaway deployments only.
+#
+# ── PER-TOOL SWITCHES ────────────────────────────────────────────────────────
+# The two booleans default to true. Turn one off to keep a single tool out of
+# the model's schema list without disabling the whole bundle; turning a tool off
+# also drops its system-prompt section and can free request-prefix cache space.
+- insert:
+    - id: tool-context7
+      name: '@deepseek-ai/dsh-tool-context7'
+      config:
+        # Hosted Context7 REST API. Change only for a mirror or local gateway.
+        apiUrl: https://context7.com/api
+        # Credential reference resolved at call time (store, then environment).
+        apiKeyEnv: CONTEXT7_API_KEY
+        resolveLibraryId: true
+        queryDocs: true
+        # Cooperative per-call budget attached to every tool (ms).
+        timeoutMs: 60000
+        # Hard cap on each tool's rendered model-facing text.
+        maxOutputChars: 200000
