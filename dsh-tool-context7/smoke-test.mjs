@@ -93,16 +93,54 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
   check("client registers a module", typeof registration === "object" && registration !== null);
   check("client module id is the package name", registration?.id === manifest.name, registration?.id);
 
-  const required = [];
-  const React = {
-    createElement: (type, props, ...children) => ({ type, props, children }),
-    useState: (initial) => [initial, () => {}],
-    useEffect: () => {},
-    useId: () => "id",
+  // A hook runtime that actually runs effects. A stub whose `useEffect` is a
+  // no-op hides every bug that lives inside an effect — which is how a crashing
+  // credential lookup reached the browser with all checks green.
+  function createReact() {
+    const states = [];
+    const effects = [];
+    let cursor = 0;
+    return {
+      React: {
+        createElement: (type, props, ...children) => ({ type, props, children }),
+        useState(initial) {
+          const index = cursor++;
+          if (!(index in states)) states[index] = initial;
+          return [states[index], (next) => {
+            states[index] = typeof next === "function" ? next(states[index]) : next;
+          }];
+        },
+        useEffect(effect) {
+          const index = cursor++;
+          if (!(index in effects)) effects[index] = { effect, ran: false };
+        },
+        useId: () => `id-${cursor++}`,
+      },
+      reset() { cursor = 0; },
+      runEffects() {
+        for (const slot of effects) {
+          if (slot === undefined || slot.ran) continue;
+          slot.ran = true;
+          slot.effect();
+        }
+      },
+      get states() { return states; },
+    };
+  }
+
+  let runtime = createReact();
+  // The factory runs once, so it gets a facade that forwards to the live runtime.
+  const ReactFacade = {
+    createElement: (...args) => runtime.React.createElement(...args),
+    useState: (...args) => runtime.React.useState(...args),
+    useEffect: (...args) => runtime.React.useEffect(...args),
+    useId: (...args) => runtime.React.useId(...args),
   };
+
+  const required = [];
   const plugin = registration?.factory((specifier) => {
     required.push(specifier);
-    if (specifier === "react") return React;
+    if (specifier === "react") return ReactFacade;
     throw new Error(`unexpected require(${specifier})`);
   });
 
@@ -110,29 +148,76 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
   check("client requires only react (no Harness Client package)", JSON.stringify(required) === JSON.stringify(["react"]), required.join(", "));
   check("client injects slots", (plugin?.inject ?? []).includes("slots"), JSON.stringify(plugin?.inject));
 
+  /**
+   * A browser context faithful to Cordis in the one way that matters here: an
+   * unknown member throws, and reaching through the remote facade throws with the
+   * DOTTED service key. That is the exact message the browser logged:
+   *   cannot get property "remote.credentials" without inject
+   */
+  function createCtx({ withCredentials = true } = {}) {
+    const credentials = {
+      describe: async (refs) => Object.fromEntries(refs.map((ref) => [ref, { configured: true, source: "store", writable: true }])),
+      set: async () => {},
+      unset: async () => {},
+    };
+    const facade = new Proxy({ $on: () => () => {} }, {
+      get(object, prop) {
+        if (prop in object) return object[prop];
+        throw new Error(`cannot get property "remote.${String(prop)}" without inject`);
+      },
+    });
+    const target = {
+      locale: {
+        register: () => () => {},
+        bind: (ns) => (key, params) => (params === undefined ? `${ns}.${key}` : `${ns}.${key}:${JSON.stringify(params)}`),
+      },
+      slots: { inject: () => () => {}, register: () => () => {} },
+      // A real `ctx.effect` runs its callback immediately and keeps the disposer;
+      // a no-op here would silently skip every effect-based registration.
+      effect: (callback) => {
+        const disposer = callback();
+        return typeof disposer === "function" ? disposer : () => {};
+      },
+      on: () => () => {},
+      inject: () => () => {},
+      // `remote` is declared in the plugin's `inject`, so the context resolves it.
+      remote: facade,
+      get: (name) => (name === "remote" ? facade : name === "remote.credentials" ? (withCredentials ? credentials : undefined) : undefined),
+    };
+    return {
+      ctx: new Proxy(target, {
+        get(object, prop) {
+          if (prop in object) return object[prop];
+          throw new Error(`cannot get property "${String(prop)}" without inject`);
+        },
+      }),
+      credentials,
+    };
+  }
+
   const registrations = [];
   const dictionaries = [];
-  const effects = [];
-  const ctx = {
+  const appCtx = createCtx();
+  plugin.apply({
+    ...appCtx.ctx,
     locale: {
       register: (ns, dicts) => { dictionaries.push({ ns, dicts }); return () => {}; },
       bind: (ns) => (key, params) => (params === undefined ? `${ns}.${key}` : `${ns}.${key}:${JSON.stringify(params)}`),
     },
     slots: {
-      inject: (owner, callback) => { effects.push(owner); callback(); return () => {}; },
+      inject: (owner, callback) => { callback(); return () => {}; },
       register: (options, component) => { registrations.push({ options, component }); return () => {}; },
     },
-    effect: (callback) => { callback(); return () => {}; },
-    get: () => undefined,
-  };
-  plugin.apply(ctx);
+  });
 
   check("client registers into plugins.row.config", registrations.length === 1 && registrations[0].options.name === "plugins.row.config",
     registrations.map((entry) => entry.options.name).join(", "));
   const key = registrations[0]?.options.key;
   check("row config key is '<package>#<row id>'", key === `${manifest.name}#tool-context7`, key);
   check("row id matches the bundled patch", /id:\s*tool-context7/.test(patch));
-  check("client registers en and zh dictionaries", dictionaries.length === 1 && dictionaries[0].dicts.en !== undefined && dictionaries[0].dicts.zh !== undefined);
+
+  check("client registers en and zh dictionaries", dictionaries.length === 1 && dictionaries[0].dicts.en !== undefined && dictionaries[0].dicts.zh !== undefined,
+    `${dictionaries.length} registration(s)`);
 
   // Every dictionary key must exist in both languages, or the page renders a raw
   // key in one locale.
@@ -143,18 +228,7 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
   const extras = Object.keys(zh).filter((entry) => en[entry] === undefined);
   check("neither dictionary has extra keys", extras.length === 0, extras.join(", "));
 
-  // The summary view is what the row's one-liner falls back to; it must render
-  // without a form.
-  const summary = registrations[0]?.component({ t: (label, params) => (params === undefined ? label : `${label}:${JSON.stringify(params)}`), view: "summary" });
-  check("summary view renders without a form", typeof summary === "object" && summary !== null);
-
-  // A row page whose entry projects no volatile field passes no `form`; the page
-  // must say so instead of throwing, because a throwing component blanks the slot.
-  const withoutForm = registrations[0]?.component({ t: (label) => label, view: "page" });
-  check("page without a form renders a fallback", typeof withoutForm === "object" && withoutForm !== null);
-
-  // With a form, the page renders the form controls. Hooks are stubbed above, and
-  // `useId` returns a constant, so this only asserts that rendering does not throw.
+  const t = (label, params) => (params === undefined ? label : `${label}:${JSON.stringify(params)}`);
   const form = {
     state: {
       status: "ready",
@@ -166,13 +240,41 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
     },
     mutate: async () => true,
   };
-  let page;
-  try {
-    page = registrations[0]?.component({ t: (label) => label, view: "page", form, ctx });
-    check("page with a form renders", typeof page === "object" && page !== null);
-  } catch (error) {
-    check("page with a form renders", false, String(error?.message ?? error));
+
+  /** Render once with a fresh runtime, then flush effects. A throw is a slot crash. */
+  let last;
+  function render(label, props) {
+    runtime = createReact();
+    last = runtime;
+    try {
+      const tree = registrations[0].component(props);
+      runtime.runEffects();
+      check(label, tree !== undefined && tree !== null);
+      return tree;
+    } catch (error) {
+      check(label, false, `${error?.constructor?.name}: ${error?.message}`);
+      return undefined;
+    }
   }
+
+  render("summary view renders without a form", { t, view: "summary" });
+  // A row page whose entry projects no volatile field passes no `form`; the page
+  // must say so instead of throwing, because a throwing component blanks the slot.
+  render("page without a form renders a fallback", { t, view: "page" });
+
+  // The full page, against a ctx whose facade traps unknown members.
+  render("page renders against the Cordis inject trap", { t, view: "page", form, ctx: createCtx().ctx });
+  // `describe()` is a round trip, so the accepted snapshot lands on a later tick.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  check("the credential lookup resolved", last.states.some((state) => state?.status === "ready"),
+    JSON.stringify(last.states.filter((state) => state?.status !== undefined)));
+  check("the credential namespace is read by its dotted key", /ctx\.get\(\s*["']remote\.credentials["']\s*\)/.test(clientSource));
+  check("the facade is never reached through for a namespace", !/ctx\.get\(\s*["']remote["']\s*\)\?\.\w/.test(clientSource));
+
+  // A deployment without a credential controller must degrade, not crash.
+  render("page degrades without a credential namespace", { t, view: "page", form, ctx: createCtx({ withCredentials: false }).ctx });
+  check("the missing namespace reads as unavailable", last.states.some((state) => state?.status === "unavailable"),
+    JSON.stringify(last.states.filter((state) => state?.status !== undefined)));
 
   // The page must not import the primitives package; the plan forbids it, and
   // slot entry crashes are silent otherwise.

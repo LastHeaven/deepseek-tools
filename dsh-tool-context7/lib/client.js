@@ -271,25 +271,47 @@ window.__ModuleLoader__.load({
      * `describe` answers configured/source/writable only; `set` and `unset` are
      * the write path. The reference is re-read when the name changes and whenever
      * the Host announces a committed change to it.
+     *
+     * `ctx.get("remote.credentials")` names the namespace service in full. Two
+     * details make this the only safe form:
+     *
+     * - `ctx.get(name)` returns `undefined` for a name nobody provided, so a
+     *   profile without a credential controller degrades to "no key section"
+     *   instead of failing.
+     * - The value it returns is a traceable proxy, so reaching *through* it
+     *   (`ctx.get("remote").credentials`) re-enters service resolution with the
+     *   dotted key and throws `cannot get property "remote.credentials" without
+     *   inject`. A throw inside a slot component blanks the entire page, which is
+     *   exactly how this form failed the first time.
      */
+    function credentialNamespace(ctx) {
+      if (ctx === undefined || ctx === null) return undefined;
+      const service = ctx.get("remote.credentials");
+      if (service === undefined || service === null) return undefined;
+      // Guard the shape, not just presence: an older Host could expose the name
+      // with a different surface, and calling a missing method throws later.
+      if (typeof service.describe !== "function") return undefined;
+      return service;
+    }
+
     function useCredential(ctx, ref) {
       const [state, setState] = React.useState({ status: "loading" });
 
       React.useEffect(() => {
-        const namespace = ctx.get("remote")?.credentials;
-        const name = ref.trim();
+        const name = String(ref ?? "").trim();
         if (name === "") {
           setState({ status: "ready", configured: false, writable: false });
           return undefined;
         }
-        if (namespace === undefined) {
+        const service = credentialNamespace(ctx);
+        if (service === undefined) {
           setState({ status: "unavailable" });
           return undefined;
         }
         let live = true;
         const read = async () => {
           try {
-            const views = await namespace.describe([name]);
+            const views = await service.describe([name]);
             if (!live) return;
             const view = views === null || views === undefined ? undefined : views[name];
             setState({
@@ -304,7 +326,12 @@ window.__ModuleLoader__.load({
           }
         };
         read();
-        const off = ctx.remote?.$on?.("credentials/reference-updated", (changed) => {
+        // `remote` is declared in `inject` and `$on` is an ordinary method of that
+        // facade, so this read is safe — it is the same call the shipped web-search
+        // settings page makes. Only an unknown *namespace* name trips the trap.
+        // A page rendered without a context (the summary view) skips the subscription.
+        const facade = ctx === undefined || ctx === null ? undefined : ctx.remote;
+        const off = facade === undefined ? undefined : facade.$on("credentials/reference-updated", (changed) => {
           if (changed === name) read();
         });
         return () => {
@@ -452,12 +479,12 @@ window.__ModuleLoader__.load({
       };
 
       const saveSecret = async () => {
-        const namespace = ctx.get("remote")?.credentials;
-        if (namespace === undefined || secret.trim() === "") return;
+        const service = credentialNamespace(ctx);
+        if (service === undefined || secret.trim() === "") return;
         setKeyBusy(true);
         setKeyNotice(null);
         try {
-          await namespace.set(reference, secret.trim());
+          await service.set(reference, secret.trim());
           setSecret("");
           setKeyNotice({ kind: "ok", text: t("keySaved") });
         } catch (error) {
@@ -468,12 +495,12 @@ window.__ModuleLoader__.load({
       };
 
       const clearSecret = async () => {
-        const namespace = ctx.get("remote")?.credentials;
-        if (namespace === undefined) return;
+        const service = credentialNamespace(ctx);
+        if (service === undefined) return;
         setKeyBusy(true);
         setKeyNotice(null);
         try {
-          await namespace.unset(reference);
+          await service.unset(reference);
         } catch (error) {
           setKeyNotice({ kind: "error", text: messageOf(error) });
         } finally {
@@ -652,8 +679,9 @@ window.__ModuleLoader__.load({
     // Client plugin entry
     // -------------------------------------------------------------------------
 
-    /** `remote` is a service dependency; the credentials namespace is optional and
-     * read through `ctx.get`, so a profile without it still renders the form. */
+    /** `remote` is a hard dependency because the facade's `$on` carries the
+     * credential invalidation; the credential *namespace* is resolved per page
+     * through `ctx.get`, so a profile without a controller still renders. */
     const inject = ["slots", "locale", "remote"];
 
     function apply(ctx) {
