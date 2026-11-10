@@ -13,7 +13,6 @@
 // Firecrawl instance — the reference case for a self-hosted plugin, which has no
 // built-in target.
 import { readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -22,6 +21,60 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const manifest = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8"));
 const LIVE = process.env.FIRECRAWL_SMOKE_LIVE === "1";
+
+// ---------------------------------------------------------------------------
+// 0. Re-exec with the @deepseek-ai peers aliased
+// ---------------------------------------------------------------------------
+
+// The plugin's `@deepseek-ai/*` peers are NOT dependencies of this package:
+// they belong to the harness that loads it. A plain dynamic `import()` of the
+// module therefore fails with ERR_MODULE_NOT_FOUND, because bare-specifier
+// resolution walks up from the module's REAL path — which is this checkout, or
+// a profile's symlink to it — and neither has the peers.
+//
+// So resolve the peers the way the harness does (from the dsh installation that
+// owns them) and alias them for the duration of this process. `--import` only
+// accepts a specifier, and the alias has to be installed before the loader
+// resolves it, hence the re-exec.
+//
+// This runs FIRST, before any assertion prints, so a run reports each check
+// exactly once. The re-exec uses the same file, and the guard variable stops the
+// child from recursing.
+const PEER_ALIAS = `
+import { registerHooks } from "node:module";
+import { createRequire } from "node:module";
+const require = createRequire(process.env.DSH_PEER_ANCHOR);
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith("@deepseek-ai/")) {
+      try { return { url: new URL("file://" + require.resolve(specifier).replace(/\\\\/g, "/")).href, shortCircuit: true }; }
+      catch { /* fall through to the default resolver */ }
+    }
+    return nextResolve(specifier, context);
+  }
+});
+`;
+
+if (process.env.FIRECRAWL_SMOKE_PEERS !== "1") {
+  const dshRoot = process.env.FIRECRAWL_DSH_ROOT ?? join(dirname(execFileSync("where", ["dsh"], { encoding: "utf8" }).split(/\r?\n/)[0].trim()), "node_modules", "@deepseek-ai", "dsh");
+  const anchor = join(dshRoot, "package.json");
+  if (!existsSync(anchor)) {
+    console.log(`FAIL cannot locate the dsh installation to resolve @deepseek-ai peers (looked for ${anchor})`);
+    console.log("Set FIRECRAWL_DSH_ROOT to the dsh package directory and retry.");
+    process.exit(1);
+  }
+  const aliasDir = join(HERE, ".smoke-peers");
+  mkdirSync(aliasDir, { recursive: true });
+  const aliasFile = join(aliasDir, "peers.mjs");
+  writeFileSync(aliasFile, PEER_ALIAS, "utf8");
+  const result = (await import("node:child_process")).spawnSync(
+    process.execPath,
+    ["--import", pathToFileURL(aliasFile).href, fileURLToPath(import.meta.url), ...process.argv.slice(2)],
+    { stdio: "inherit", env: { ...process.env, DSH_PEER_ANCHOR: anchor, FIRECRAWL_SMOKE_PEERS: "1" } }
+  );
+  rmSync(aliasDir, { recursive: true, force: true });
+  process.exit(result.status ?? 1);
+}
 
 let failures = 0;
 function check(label, condition, detail) {
@@ -418,54 +471,9 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
 // 3. Plugin contract
 // ---------------------------------------------------------------------------
 
-// The plugin's `@deepseek-ai/*` peers are NOT dependencies of this package:
-// they belong to the harness that loads it. A plain dynamic `import()` of the
-// module therefore fails with ERR_MODULE_NOT_FOUND, because bare-specifier
-// resolution walks up from the module's REAL path — which is this checkout, or
-// a profile's symlink to it — and neither has the peers.
-//
-// So resolve the peers the way the harness does (from the dsh installation that
-// owns them) and alias them for the duration of this process. `--import` only
-// accepts a specifier, and the alias has to be installed before the loader
-// resolves it, hence the re-exec.
-const PEER_ALIAS = `
-import { registerHooks } from "node:module";
-import { createRequire } from "node:module";
-const require = createRequire(process.env.DSH_PEER_ANCHOR);
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith("@deepseek-ai/")) {
-      try { return { url: new URL("file://" + require.resolve(specifier).replace(/\\\\/g, "/")).href, shortCircuit: true }; }
-      catch { /* fall through to the default resolver */ }
-    }
-    return nextResolve(specifier, context);
-  }
-});
-`;
-
-if (process.env.FIRECRAWL_SMOKE_PEERS !== "1") {
-  const dshRoot = process.env.FIRECRAWL_DSH_ROOT ?? join(dirname(execFileSync("where", ["dsh"], { encoding: "utf8" }).split(/\r?\n/)[0].trim()), "node_modules", "@deepseek-ai", "dsh");
-  const anchor = join(dshRoot, "package.json");
-  if (!existsSync(anchor)) {
-    console.log(`FAIL cannot locate the dsh installation to resolve @deepseek-ai peers (looked for ${anchor})`);
-    console.log("Set FIRECRAWL_DSH_ROOT to the dsh package directory and retry.");
-    process.exit(1);
-  }
-  const aliasDir = join(HERE, ".smoke-peers");
-  mkdirSync(aliasDir, { recursive: true });
-  const aliasFile = join(aliasDir, "peers.mjs");
-  writeFileSync(aliasFile, PEER_ALIAS, "utf8");
-  const result = (await import("node:child_process")).spawnSync(
-    process.execPath,
-    ["--import", pathToFileURL(aliasFile).href, fileURLToPath(import.meta.url), ...process.argv.slice(2)],
-    { stdio: "inherit", env: { ...process.env, DSH_PEER_ANCHOR: anchor, FIRECRAWL_SMOKE_PEERS: "1" } }
-  );
-  rmSync(aliasDir, { recursive: true, force: true });
-  process.exit(result.status ?? 1);
-}
-
-// Past the re-exec the peers resolve, so the installed bundle can be imported
-// even though its real path has no node_modules of its own.
+// Past the re-exec at the top of this file the peers resolve, so the installed
+// bundle can be imported even though its real path has no node_modules of its
+// own.
 const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), ".dsh");
 const PROFILE = process.env.FIRECRAWL_PLUGIN_PROFILE ?? "web";
 const INSTALLED = join(DSH_HOME, "profiles", PROFILE, "node_modules", "@deepseek-ai", "dsh-tool-firecrawl", "lib", "index.js");
