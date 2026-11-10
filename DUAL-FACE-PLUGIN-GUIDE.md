@@ -1,15 +1,18 @@
 # DSH 双端插件（Host + Client）开发指南
 
 本文档面向需要为 **DeepSeek Harness（DSH）** 编写「带浏览器 UI 的插件」的其他
-Agent。它记录从零开发、接线到验证的完整流程，以本仓库的 `dsh-build-panel`
-（Build 工作流面板 + `/build` 命令）为参考实现。
+Agent。它记录从零开发、打包、接线、启停到验证的完整流程，以本仓库的
+`dsh-build-panel`（Build 工作流面板 + `/build` 命令）为参考实现。
 
 > 与本仓库另一份 [`PLUGIN-DEVELOPMENT-GUIDE.md`](./PLUGIN-DEVELOPMENT-GUIDE.md)
-> 的分工：那份讲的是「只注册模型工具的 Host 单端插件」（context7 / firecrawl /
-> vision）；这份讲的是「Host 提供能力 + Client 提供面板 UI」的**双端插件**，以及
-> 两条独有的链路——slash 命令、客户端面板。
+> 的分工：那份讲的是**插件怎么打包成标准 bundle**（`dsh.bundle`、patch 层、
+> locale/icon、安装与启停），以及「只注册模型工具的 Host 单端插件」；这份讲的是
+> 「Host 提供能力 + Client 提供面板 UI」的**双端插件**，以及两条独有的链路——
+> slash 命令、客户端面板。
 >
-> 目标读者：需要「照着做就能跑通」的 Agent。每一步都给出可验证的命令和踩坑点。
+> 双端包同样应该声明 `dsh.bundle`（官方 `dsh-experimental-liveshare` 就是
+> bundle + client 同一个包），这样它才能被 `dsh plugin add` 安装、出现在插件页、
+> 并被启用停用。本文第 3、9 节给出完整清单。
 
 ---
 
@@ -23,7 +26,7 @@ Agent。它记录从零开发、接线到验证的完整流程，以本仓库的
 6. [Client 半：模块系统与 seed words](#6-client-半模块系统与-seed-words)
 7. [Client 半：注册面板 UI（Slot）](#7-client-半注册面板-ui-slot)
 8. [Client → Host 数据通道](#8-client--host-数据通道)
-9. [安装与接线](#9-安装与接线)
+9. [安装、接线与启停](#9-安装接线与启停)
 10. [验证：三段冒烟](#10-验证三段冒烟)
 11. [踩坑排查表](#11-踩坑排查表)
 12. [参考：本仓库的 dsh-build-panel](#12-参考本仓库的-dsh-build-panel)
@@ -86,25 +89,42 @@ my-plugin/
 
 ### `package.json`
 
-关键在 `dsh.client` 声明——它让 node 半的 `client-modules` 服务把这个包扫进
+一份清单里可以同时声明三件事：`dsh.bundle`（配置层，让它可安装可启停）、
+`dsh.client`（浏览器半，让它进 boot graph）、以及 `peerDependencies`（Host 半的
+外部依赖）。**官方也是这么做的**——`@deepseek-ai/dsh-experimental-liveshare` 就是
+一个包同时声明 `dsh.bundle` 与 `dsh.client`。
+
+`dsh.client` 让 node 半的 `client-modules` 服务把这个包扫进
 `window.__DSH_BOOT__` 的模块图：
 
 ```json
 {
   "name": "@deepseek-ai/dsh-my-plugin",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
-  "files": ["lib/index.js", "lib/client.js"],
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "engines": { "dsh": ">=0.2.0 <0.3.0" },
   "dsh": {
+    "manifestVersion": 1,
+    "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-api-remotes",
         "@deepseek-ai/dsh-client-ui-sidebar"
       ],
@@ -125,11 +145,17 @@ my-plugin/
 - `exports["./client"]` **必须存在**，否则 `client-modules` 报
   `declares dsh.client but exports no "./client" bundle`。
 - `dsh.client.platform` 必须是 `"web"`，否则不进入 web 的 boot graph。
+- `dsh.bundle` + `cordis.patch.yml` 让它走 `dsh plugin add` 的 bundle 安装路径，
+  并因此出现在插件页、可启用停用。清单细节见
+  `PLUGIN-DEVELOPMENT-GUIDE.md` 第 4～7 节。
+- `files` 必须同时包含 `lib/client.js` 与 `cordis.patch.yml`：前者漏了浏览器报
+  `require("…") missed the module table`，后者漏了则「装上了但不挂载」。
 - `dsh.client.inject` 声明这个 client 半依赖的其它 client 包（模块图排序用）。
   只写你 `require` 的「包级」依赖；**`react` 不是包级依赖，是 seed word（见第 6 节），
   不要写进 inject**。
 - `peerDependencies` 声明 Host 半 import 的 `@deepseek-ai/*` 包（零运行时 npm 依赖
-  的前提，见 `PLUGIN-DEVELOPMENT-GUIDE.md` 第 7 节）。
+  的前提，见 `PLUGIN-DEVELOPMENT-GUIDE.md` 第 5 节）。写了 `engines.dsh` 之后
+  peer 范围不再参与兼容性判定，写成 `*` 最省事。
 
 ---
 
@@ -268,6 +294,8 @@ window.__ModuleLoader__.load({
 
 ## 7. Client 半：注册面板 UI（Slot）
 
+<a id="7-client-半注册面板-ui-slot"></a>
+
 Client 半的 `apply(ctx)` 里通过 `ctx.slots`（或 `ctx.get("slots")`）注册 UI。
 
 ### 7.1 选对 Slot
@@ -365,12 +393,32 @@ client 半里：
 
 ---
 
-## 9. 安装与接线
+## 9. 安装、接线与启停
 
-与单端工具插件完全一致（详见 `PLUGIN-DEVELOPMENT-GUIDE.md` 第 7、8 节）：
+**推荐走 bundle 安装**。双端包在清单里同时声明 `dsh.bundle` 与 `dsh.client`，
+一条 `dsh plugin add` 同时完成「Host 半可加载」「client 半进 boot graph」
+「出现在插件页且可启停」这三件事（清单写法见第 3 节）：
 
 ```powershell
-# 方式 A：零依赖直接复制
+dsh plugin --profile web add D:/git/deepseek-tools/dsh-my-plugin
+```
+
+装完验证（详细套路见 `PLUGIN-DEVELOPMENT-GUIDE.md` 第 11、13 节）：
+
+```powershell
+# 1. 配置层已进入组合
+node "D:\npm\node_global\node_modules\@deepseek-ai\dsh\lib\bin.js" --profile web --dump-config
+
+# 2. 裸名可解析
+cd "C:\Users\hxy\.dsh\profiles\web"
+node --input-type=module -e "const m = await import('@deepseek-ai/dsh-my-plugin'); console.log(m.name)"
+```
+
+### 手工接线（仅调试）
+
+想跳过 pnpm 快速验证时，才用「复制 + 手写 patch」：
+
+```powershell
 $src = "D:\git\deepseek-tools\dsh-my-plugin"
 $dst = "C:\Users\hxy\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-my-plugin"
 New-Item -ItemType Directory -Force -Path "$dst\lib" | Out-Null
@@ -387,12 +435,21 @@ Copy-Item "$src\lib\client.js" "$dst\lib\client.js" -Force
       name: '@deepseek-ai/dsh-my-plugin'
 ```
 
-验证裸名可解析：
+> 手工接线的**代价**：这个包不在 `dsh.profile.bundles` 里，插件页管不到它，
+> 也就没有「启用/停用」开关，只能继续手改 YAML。而且 `locale/`、`icon.svg`
+> 不会跟着拷贝，插件页只有裸包名。**交付前必须改回 `dsh plugin add`。**
 
-```powershell
-cd "C:\Users\hxy\.dsh\profiles\web"
-node --input-type=module -e "const m = await import('@deepseek-ai/dsh-my-plugin'); console.log(m.name)"
-```
+### 停用 / 卸载
+
+装成 bundle 之后，双端包的两个半**一起**受开关控制：
+
+| 操作 | 效果 |
+| --- | --- |
+| 插件页关掉 / `disabled: true` | Host 半 fiber 卸载（命令、工具消失），client 半退出 boot graph（面板消失） |
+| `dsh plugin --profile web remove @deepseek-ai/dsh-my-plugin` | 依赖与配置层一起移除 |
+
+client 半的改动要**刷新浏览器页面**才生效；只重载 Host 半不会重新执行已加载的
+client bundle。
 
 ---
 
@@ -401,7 +458,7 @@ node --input-type=module -e "const m = await import('@deepseek-ai/dsh-my-plugin'
 ### 10.1 Host 半冒烟（不重启 DSH）
 
 写 `smoke-test.mjs`，构造假 ctx 直接 `apply()` 并跑 handler（套路见
-`PLUGIN-DEVELOPMENT-GUIDE.md` 第 9.1 节）。假 agent 长这样：
+`PLUGIN-DEVELOPMENT-GUIDE.md` 第 13.1 节）。假 agent 长这样：
 
 ```js
 const agent = {
@@ -411,6 +468,11 @@ const agent = {
 ```
 
 验证：`list`/`overview`/`run` 三个分支的返回、`followup` 是否被触发。
+
+双端包的 Host 半冒烟还要顺带断言**清单契约**（和 `dsh-tool-firecrawl` 的离线段
+同一套做法）：`dsh.bundle.patch` 存在、`dsh.client.platform === "web"`、
+`files` 同时含 `cordis.patch.yml` 与 `lib/client.js`、`exports["./client"]` 存在。
+这些是「装上了但没挂载/面板不出现」类问题的第一道防线。
 
 ### 10.2 Client 半冒烟（不打开浏览器）
 
@@ -447,7 +509,9 @@ Invoke-WebRequest "http://127.0.0.1:3080/plugins/@deepseek-ai/dsh-my-plugin/clie
 | 现象 | 原因 | 修复 |
 | --- | --- | --- |
 | `declares dsh.client but exports no "./client" bundle` | package.json 缺 `exports["./client"]` | 补上 `"./client": "./lib/client.js"` |
-| client bundle 没进 `__DSH_BOOT__` | `dsh.client.platform !== "web"`，或插件没进 profile node_modules / 没在 patch 里接线 | 检查三处：`dsh.client`、node_modules 拷贝、`cordis.patch.yml` 的 insert |
+| client bundle 没进 `__DSH_BOOT__` | `dsh.client.platform !== "web"`，或包没装进 profile（或装了但没接 bundle 层） | 检查三处：`dsh.client`、`dsh plugin add` 装的包、`cordis.patch.yml` 的 insert |
+| 装上了但插件页没有 / 无法启停 | 包没声明 `dsh.bundle`，只是普通依赖 | 补 `dsh.bundle.patch` + `cordis.patch.yml`，用 `dsh plugin add` 重装 |
+| 关掉插件后页面还留着面板 | 只重载了 Host 半，client bundle 仍在页面里 | 刷新浏览器页面 |
 | 浏览器 `require("react")` 报 miss | 把 `react` 写进了 `dsh.client.inject`（它该是 seed word） | 从 inject 里删掉 `react`，直接 `require("react")` |
 | 浏览器报 `require("xxx") missed the module table` | 用了非 seed word 且没写进 `dsh.client.inject` 的包 | 确认该包是不是 seed word；不是就加进 inject |
 | `service "commands" is not declared` | Host 半用了 `ctx.commands` 但没 `inject: ["commands"]` | 加 inject |
@@ -480,3 +544,18 @@ dsh-build-panel/
 - 面板：`sidebar.footer.action` 注册 + `useSessions` 拿会话 + `position: fixed` 悬浮层。
 - Client→Host 用 `remote.commands.execute` 回传 JSON，零自建 RPC。
 - 把 opencode 的 `build.md` 工作流改写成 `agent.followup` 的指令文本，实现同等效果。
+
+> **注意**：`dsh-build-panel` 目前仍是**裸模块**形态（只有 `package.json` +
+> `lib/`，靠手工拷贝 + 手写 `cordis.patch.yml` 接线），所以它**不出现在插件页、
+> 无法用开关启停**。要升级成第 3 节那种双端 bundle，补上：
+>
+> 1. `package.json` 加 `dsh.bundle`、`engines.dsh`、`icon`，并把
+>    `cordis.patch.yml`、`locale/*.json`、`icon.svg` 加进 `exports` 与 `files`；
+> 2. 新增 `cordis.patch.yml`，一行 `id: build-panel` / `name: '@deepseek-ai/dsh-build-panel'`；
+> 3. 新增 `locale/en.json`、`locale/zh.json` 与 `icon.svg`；
+> 4. 用 `dsh plugin --profile web add D:/git/deepseek-tools/dsh-build-panel` 重装，
+>    让它进入 `dsh.profile.bundles`（这一步是「可管理」的前提，手工拷贝做不到）。
+>
+> 单端工具插件升级成 bundle 的完整对照，见
+> [`dsh-tool-firecrawl`](dsh-tool-firecrawl/README.md) 与
+> `PLUGIN-DEVELOPMENT-GUIDE.md` 第 4～7 节。
