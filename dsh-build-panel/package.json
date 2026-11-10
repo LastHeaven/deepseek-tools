@@ -11,8 +11,7 @@
   },
   "files": [
     "lib/index.js",
-    "lib/client.js",
-    "commit.md"
+    "lib/client.js"
   ],
   "license": "MIT",
   "dsh": {

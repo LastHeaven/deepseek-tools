@@ -1,7 +1,7 @@
 // Client-half smoke test: load the bundle factory in a fake module-system
 // environment, drive apply() through the slot registration, and then render the
 // panel with a miniature stateful React so the real click path can be walked:
-// open the panel → pick a task → "执行此任务" / "执行 commit".
+// open the panel → pick a task → "执行此任务".
 import { readFileSync } from "node:fs";
 
 const code = readFileSync("D:/git/deepseek-tools/dsh-build-panel/lib/client.js", "utf8");
@@ -280,29 +280,31 @@ const buttons = findAll(tree, (node) => node.type === "button").map((node) => te
 console.log("detail buttons:", buttons.join(" | "));
 
 const runButton = find(tree, buttonNamed("执行此任务"));
-const commitButton = find(tree, buttonNamed("执行 commit"));
 if (runButton === null) throw new Error("执行此任务 button missing");
-if (commitButton === null) throw new Error("执行 commit button missing");
+if (find(tree, buttonNamed("执行 commit")) !== null) throw new Error("执行 commit button must be gone");
 
-// the new button must sit immediately after 执行此任务 in the same action row
+// the action row must list only the remaining controls
 const actionRow = find(tree, (node) => node.props?.className === "bp_actions");
 const labels = (actionRow?.children ?? []).map((node) => textOf(node).trim());
 console.log("action row:", labels.join(" | "));
-if (labels.indexOf("执行 commit") !== labels.indexOf("执行此任务") + 1) {
-  throw new Error("执行 commit is not right after 执行此任务: " + labels.join(","));
+if (labels.join("|") !== "返回列表|执行此任务") {
+  throw new Error("unexpected action row: " + labels.join(","));
 }
 
-// 3. clicking the commit button drives `/build <任务号> commit`
-commitButton.props.onClick();
+// 3. clicking the run button drives `/build <任务号> run`
+runButton.props.onClick();
 await settle();
 console.log("command lines:", JSON.stringify(commandLines));
 if (commandLines.length !== 1) throw new Error("expected exactly one command invocation, got " + commandLines.length);
-if (commandLines[0].line !== "/build 8978 commit") throw new Error("unexpected command line: " + commandLines[0].line);
+if (commandLines[0].line !== "/build 8978 run") throw new Error("unexpected command line: " + commandLines[0].line);
 if (commandLines[0].sessionId !== "session-abc") throw new Error("wrong session id: " + commandLines[0].sessionId);
 if (commandLines[0].images.length !== 0) throw new Error("command must not carry attachments");
-const doneNote = find(tree, wantsLabel("commit 提交流程"));
-if (doneNote === null) throw new Error("commit result note not rendered");
+const doneNote = find(tree, wantsLabel("已把工作流指令交给"));
+if (doneNote === null) throw new Error("run result note not rendered");
 console.log("done note:", textOf(doneNote).trim());
+
+// no commit wording may survive anywhere in the rendered card
+if (textOf(tree).includes("commit")) throw new Error("commit wording still rendered in the panel: " + textOf(tree));
 
 react.dispose();
 console.log("smoke OK");

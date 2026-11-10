@@ -89,15 +89,6 @@ window.__ModuleLoader__.load({
 			return executeBuildCommand(remote, sessionId, "/build " + id + " run");
 		}
 
-		/**
-		 * Drive: hand the plugin's bundled commit workflow to the agent for this
-		 * task. The host reads and binds the template, so a missing file surfaces
-		 * here as an error.
-		 */
-		async function runCommitCommand(remote, sessionId, id) {
-			return executeBuildCommand(remote, sessionId, "/build " + id + " commit");
-		}
-
 		/** Execute one `/build …` line and unwrap the command result. */
 		async function executeBuildCommand(remote, sessionId, line) {
 			const res = await remote.commands.execute(sessionId, line, []);
@@ -169,7 +160,6 @@ window.__ModuleLoader__.load({
 			};
 
 			const runTask = (id) => drive(() => runTaskCommand(remote, sessionId, id), "run");
-			const runCommit = (id) => drive(() => runCommitCommand(remote, sessionId, id), "commit");
 
 			let body;
 			if (detail !== null) {
@@ -179,8 +169,8 @@ window.__ModuleLoader__.load({
 							el("span", { className: "bp_rowName" }, "任务 " + detail.id),
 							el("span", { className: "bp_rowMeta" },
 								detail.phase === "loading" ? "加载中" :
-								detail.phase === "running" ? (detail.action === "commit" ? "下达 commit 中" : "下达中") :
-								detail.phase === "done" ? (detail.action === "commit" ? "已下达 commit" : "已下达执行") :
+								detail.phase === "running" ? "下达中" :
+								detail.phase === "done" ? "已下达执行" :
 								detail.phase === "error" ? "出错" : "就绪")
 						)
 					),
@@ -194,19 +184,11 @@ window.__ModuleLoader__.load({
 						detail.data.archiveTail && el("pre", { className: "bp_pre" }, detail.data.archiveTail),
 						el("div", { className: "bp_actions" },
 							el("button", { type: "button", className: "bp_btn", onClick: () => setDetail(null) }, "返回列表"),
-							el("button", { type: "button", className: "bp_btn bp_btnPush bp_btnPrimary", onClick: () => runTask(detail.id) }, "执行此任务"),
-							el("button", {
-								type: "button",
-								className: "bp_btn",
-								title: "按插件内置的提交流程检查变更并提交",
-								onClick: () => runCommit(detail.id)
-							}, "执行 commit")
+							el("button", { type: "button", className: "bp_btn bp_btnPush bp_btnPrimary", onClick: () => runTask(detail.id) }, "执行此任务")
 						)
 					),
 					detail.phase === "done" && el(react.Fragment, null,
-						el("div", { className: "bp_note" }, detail.action === "commit"
-							? "已把 commit 提交流程交给当前会话的 agent 执行，请回到对话查看进度。"
-							: "已把工作流指令交给当前会话的 agent 执行，请回到对话查看进度。"),
+						el("div", { className: "bp_note" }, "已把工作流指令交给当前会话的 agent 执行，请回到对话查看进度。"),
 						el("div", { className: "bp_actions" },
 							el("button", { type: "button", className: "bp_btn", onClick: () => setDetail(null) }, "返回列表")
 						)
