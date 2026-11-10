@@ -60,8 +60,11 @@ window.__ModuleLoader__.load({
       keyConfigured: "Configured",
       keyMissing: "Not set",
       keyUnknown: "Unavailable",
+      keyLoading: "Checking…",
       keySource: "Source: {source}",
-      keyFallback: "Without a key the tools still work on Context7's anonymous tier, which is rate limited.",
+      keyEditable: "Stored in the credential store at $DSH_HOME/.credentials.yaml. Pasting a key here replaces it; the value never enters this form's saved configuration.",
+      keyUnwritable: "The credential store reports this reference as read-only, so it cannot be written from this page. Set it in the environment named above.",
+      keyError: "Could not read the credential store: {message}",
       keyValue: "New key",
       keyValuePlaceholder: "Paste the Context7 key (ctx7sk…)",
       keySave: "Save key",
@@ -102,8 +105,11 @@ window.__ModuleLoader__.load({
       keyConfigured: "已配置",
       keyMissing: "未设置",
       keyUnknown: "不可用",
+      keyLoading: "检查中…",
       keySource: "来源：{source}",
-      keyFallback: "没有密钥时工具仍可使用 Context7 匿名通道，但有速率限制。",
+      keyEditable: "保存在凭据库 $DSH_HOME/.credentials.yaml 中。在此粘贴密钥会覆盖旧值；密钥不会写进本表单保存的配置里。",
+      keyUnwritable: "凭据库报告该引用为只读，无法在此页面写入。请在上方指定的环境变量中设置。",
+      keyError: "无法读取凭据库：{message}",
       keyValue: "新密钥",
       keyValuePlaceholder: "粘贴 Context7 密钥（ctx7sk…）",
       keySave: "保存密钥",
@@ -272,17 +278,18 @@ window.__ModuleLoader__.load({
      * the write path. The reference is re-read when the name changes and whenever
      * the Host announces a committed change to it.
      *
-     * `ctx.get("remote.credentials")` names the namespace service in full. Two
-     * details make this the only safe form:
+     * Two wire details decide the shape of this code:
      *
-     * - `ctx.get(name)` returns `undefined` for a name nobody provided, so a
-     *   profile without a credential controller degrades to "no key section"
-     *   instead of failing.
-     * - The value it returns is a traceable proxy, so reaching *through* it
-     *   (`ctx.get("remote").credentials`) re-enters service resolution with the
-     *   dotted key and throws `cannot get property "remote.credentials" without
-     *   inject`. A throw inside a slot component blanks the entire page, which is
-     *   exactly how this form failed the first time.
+     * - `describe` returns a `RemoteResult` envelope — `{ ok, value }` or
+     *   `{ ok: false, error }` — not the mapping itself. Reading it as the mapping
+     *   silently yields `undefined` for every field, which renders as
+     *   "not set / cannot be changed here" at once. `set` and `unset` are plain
+     *   promises that reject instead.
+     * - `ctx.get("remote.credentials")` names the namespace service in full.
+     *   `ctx.get` returns `undefined` for a name nobody provided, whereas reaching
+     *   through `ctx.get("remote").credentials` re-enters service resolution with
+     *   the dotted key and throws `cannot get property "remote.credentials"
+     *   without inject`. A throw here blanks the whole slot entry.
      */
     function credentialNamespace(ctx) {
       if (ctx === undefined || ctx === null) return undefined;
@@ -296,6 +303,9 @@ window.__ModuleLoader__.load({
 
     function useCredential(ctx, ref) {
       const [state, setState] = React.useState({ status: "loading" });
+      // Bumped by a successful write so the badge re-reads even if the Host's
+      // `credentials/reference-updated` event is missed.
+      const [nonce, setNonce] = React.useState(0);
 
       React.useEffect(() => {
         const name = String(ref ?? "").trim();
@@ -311,9 +321,15 @@ window.__ModuleLoader__.load({
         let live = true;
         const read = async () => {
           try {
-            const views = await service.describe([name]);
+            const result = await service.describe([name]);
             if (!live) return;
-            const view = views === null || views === undefined ? undefined : views[name];
+            // Unwrap the RemoteResult envelope; a refusal carries no view.
+            if (result === null || typeof result !== "object" || result.ok !== true) {
+              const message = result?.error?.message ?? result?.error?.code ?? "credentials.describe failed";
+              setState({ status: "error", message: String(message) });
+              return;
+            }
+            const view = result.value === null || result.value === undefined ? undefined : result.value[name];
             setState({
               status: "ready",
               configured: view?.configured === true,
@@ -338,9 +354,9 @@ window.__ModuleLoader__.load({
           live = false;
           if (typeof off === "function") off();
         };
-      }, [ctx, ref]);
+      }, [ctx, ref, nonce]);
 
-      return state;
+      return [state, () => setNonce((value) => value + 1)];
     }
 
     // -------------------------------------------------------------------------
@@ -399,7 +415,7 @@ window.__ModuleLoader__.load({
       const queryDocs = boolOf(draft, value, "queryDocs", true);
       const reference = apiKeyEnv.trim() || DEFAULT_API_KEY_ENV;
 
-      const credential = useCredential(ctx, reference);
+      const [credential, refreshCredential] = useCredential(ctx, reference);
       const dirty = Object.keys(draft).length > 0;
       const disabled = !editable || saving;
 
@@ -487,6 +503,7 @@ window.__ModuleLoader__.load({
           await service.set(reference, secret.trim());
           setSecret("");
           setKeyNotice({ kind: "ok", text: t("keySaved") });
+          refreshCredential();
         } catch (error) {
           setKeyNotice({ kind: "error", text: messageOf(error) });
         } finally {
@@ -501,6 +518,7 @@ window.__ModuleLoader__.load({
         setKeyNotice(null);
         try {
           await service.unset(reference);
+          refreshCredential();
         } catch (error) {
           setKeyNotice({ kind: "error", text: messageOf(error) });
         } finally {
@@ -521,7 +539,11 @@ window.__ModuleLoader__.load({
 
       const keyStatus = credential.status === "ready"
         ? (credential.configured ? t("keyConfigured") : t("keyMissing"))
-        : t("keyUnknown");
+        : credential.status === "error" ? t("keyUnknown") : t("keyLoading");
+      // A write is possible exactly when the store reports itself writable. Default
+      // to true while the answer is still in flight so the field is not hidden for
+      // a moment and then appear, and because this profile's store is writable.
+      const keyWritable = credential.status === "loading" || credential.writable === true;
 
       return h("div", { className: "tc7-form" },
         h(Styles, null),
@@ -580,10 +602,15 @@ window.__ModuleLoader__.load({
                   onClick: () => void clearSecret()
                 }, t("keyClear"))
               : null),
-          credential.status === "ready" && credential.writable === false
-            ? h("p", { className: "tc7-hint" }, t("keyUnwritable"))
-            : h("p", { className: "tc7-hint" }, t("keyFallback")),
-          credential.status === "ready" && credential.writable
+          h("p", { className: "tc7-hint" },
+            credential.status === "error"
+              ? t("keyError", { message: credential.message ?? "" })
+              : credential.writable ? t("keyEditable") : t("keyUnwritable")),
+          // The input stays visible whenever the store can be written, which is the
+          // only condition that decides whether a write can land. An earlier version
+          // also required `configured`, so an unset key showed the hint but no way to
+          // set one — the one state where the field is most needed.
+          keyWritable
             ? h("div", { className: "tc7-secretRow" },
                 h("input", {
                   id: keyId,
@@ -595,7 +622,13 @@ window.__ModuleLoader__.load({
                   "aria-label": t("keyValue"),
                   value: secret,
                   disabled: keyBusy,
-                  onChange: (event) => setSecret(event.target.value)
+                  onChange: (event) => setSecret(event.target.value),
+                  onKeyDown: (event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void saveSecret();
+                    }
+                  }
                 }),
                 h("button", {
                   type: "button",

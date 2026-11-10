@@ -149,16 +149,30 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
   check("client injects slots", (plugin?.inject ?? []).includes("slots"), JSON.stringify(plugin?.inject));
 
   /**
-   * A browser context faithful to Cordis in the one way that matters here: an
-   * unknown member throws, and reaching through the remote facade throws with the
-   * DOTTED service key. That is the exact message the browser logged:
-   *   cannot get property "remote.credentials" without inject
+   * A browser context faithful to Cordis in the two ways that matter here:
+   *
+   * 1. An unknown member throws, and reaching through the remote facade throws
+   *    with the DOTTED service key — the exact message the browser logged:
+   *      cannot get property "remote.credentials" without inject
+   * 2. `describe` answers a RemoteResult envelope (`{ ok, value }`), while
+   *    `set`/`unset` are plain promises that reject. Reading the envelope as the
+   *    mapping is what made the key field report "not set / read-only" at once.
    */
-  function createCtx({ withCredentials = true } = {}) {
+  function createCtx({ withCredentials = true, stored = undefined } = {}) {
+    let held = stored;
     const credentials = {
-      describe: async (refs) => Object.fromEntries(refs.map((ref) => [ref, { configured: true, source: "store", writable: true }])),
-      set: async () => {},
-      unset: async () => {},
+      describe: async (refs) => ({
+        ok: true,
+        value: Object.fromEntries(refs.map((ref) => [
+          ref,
+          held === undefined
+            ? { configured: false, writable: true }
+            : { configured: true, source: "file", writable: true },
+        ])),
+      }),
+      set: async (ref, value) => { held = value; },
+      unset: async () => { held = undefined; },
+      get held() { return held; },
     };
     const facade = new Proxy({ $on: () => () => {} }, {
       get(object, prop) {
@@ -275,6 +289,30 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
   render("page degrades without a credential namespace", { t, view: "page", form, ctx: createCtx({ withCredentials: false }).ctx });
   check("the missing namespace reads as unavailable", last.states.some((state) => state?.status === "unavailable"),
     JSON.stringify(last.states.filter((state) => state?.status !== undefined)));
+
+  // The key input must render for an UNSET key too: that is precisely when it is
+  // needed, and gating it on `configured` once hid it there.
+  function textOf(node, out = []) {
+    if (node === null || node === undefined) return out;
+    if (typeof node === "string") { out.push(node); return out; }
+    if (Array.isArray(node)) { for (const child of node) textOf(child, out); return out; }
+    if (typeof node === "object") {
+      if (node.type === "input" && node.props?.type === "password") out.push("PASSWORD_INPUT");
+      for (const child of node.children ?? []) textOf(child, out);
+    }
+    return out;
+  }
+
+  {
+    const tree = render("page renders with an unset key", { t, view: "page", form, ctx: createCtx().ctx });
+    check("the key input renders when no key is stored", textOf(tree).includes("PASSWORD_INPUT"),
+      textOf(tree).filter((text) => text === "PASSWORD_INPUT").length === 0 ? "no password input in the tree" : "");
+  }
+
+  {
+    const tree = render("page renders with a stored key", { t, view: "page", form, ctx: createCtx({ stored: "ctx7sk-secret" }).ctx });
+    check("the key input still renders with a stored key", textOf(tree).includes("PASSWORD_INPUT"));
+  }
 
   // The page must not import the primitives package; the plan forbids it, and
   // slot entry crashes are silent otherwise.
