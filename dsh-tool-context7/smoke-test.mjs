@@ -242,6 +242,20 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
   const extras = Object.keys(zh).filter((entry) => en[entry] === undefined);
   check("neither dictionary has extra keys", extras.length === 0, extras.join(", "));
 
+  // `Object.keys` cannot see a duplicated literal key — the later one silently
+  // wins and an outdated string can shadow the current copy. Read the source.
+  for (const [language, marker, end] of [["en", "const en = {", "const zh = {"], ["zh", "const zh = {", "const CSS"]]) {
+    const start = clientSource.indexOf(marker);
+    const stop = clientSource.indexOf(end, start + marker.length);
+    const body = clientSource.slice(start, stop);
+    const seen = new Map();
+    for (const match of body.matchAll(/^\s{6}([A-Za-z][\w]*):/gm)) {
+      seen.set(match[1], (seen.get(match[1]) ?? 0) + 1);
+    }
+    const duplicated = [...seen.entries()].filter(([, count]) => count > 1).map(([name]) => name);
+    check(`locale/${language} dictionary has no duplicate keys`, duplicated.length === 0, duplicated.join(", "));
+  }
+
   const t = (label, params) => (params === undefined ? label : `${label}:${JSON.stringify(params)}`);
   const form = {
     state: {

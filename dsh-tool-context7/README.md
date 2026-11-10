@@ -51,9 +51,12 @@ one readers of the stock Context7 tools already expect.
 
 ## Configuration
 
-Open **Plugins** in the Web sidebar, expand this bundle, and select the row's
-**Configure** control. The page stages edits and writes them on Save; nothing is
-written while you type, and leaving the page drops the drafts.
+Open **Plugins** in the Web sidebar, expand the **Context7 documentation** card,
+then select the row's **Configure** control: the row title itself is the button,
+with a `›` chevron once the row has a page. The page stages text and boolean
+edits and writes them on **Save**; nothing is written while you type, and leaving
+the page drops the drafts. The API key is the one exception — it has its own
+**Save key** control and writes immediately.
 
 | Field | Default | Editable on the page | Meaning |
 | --- | --- | --- | --- |
@@ -72,13 +75,31 @@ value only applies when the definitions are rebuilt; `apiKey` is excluded so a
 literal secret never rides the configuration wire — the page edits `apiKeyEnv`
 instead and stores the secret itself. Edit both in `cordis.patch.yml`.
 
-**The key is not in this file.** Paste it into the page's **New key** field. That
-writes it to `$DSH_HOME/.credentials.yaml` under `refs: CONTEXT7_API_KEY: …`
-through the credentials service, so the value crosses the wire in one direction
-only and never enters the profile patch. The tools resolve it at call time via
-`ctx.get("credentials")` — a soft dependency, so a composition without the store
-falls back to the `CONTEXT7_API_KEY` environment variable. Rotating the key needs
-no restart, because the store's own watcher refreshes its snapshot.
+### The API key
+
+The key is entered on the page, in the **New key** password field, and written
+through the credentials service. It lands in `$DSH_HOME/.credentials.yaml` under
+`refs:` and never in a patch file or a settings document; the value crosses the
+wire in one direction only, so no read path can return it.
+
+The section header reports the current state:
+
+| Badge | Meaning |
+| --- | --- |
+| **Configured** + `Source: file` | A key is stored in the credentials file |
+| **Configured** + `Source: env` | No stored key, but the named environment variable holds one |
+| **Not set** | Neither source has a value; the tools run on the anonymous tier |
+| **Unavailable** / **Checking…** | The store was not read (not composed, or still loading) |
+
+**Remove key** deletes the stored value and the badge returns to **Not set**. If
+the store reports the reference as read-only, the field is replaced by an
+explanation naming the environment variable to set instead — a key that arrives
+from the process environment cannot be overwritten from a page.
+
+The tools resolve the key at call time through `ctx.get("credentials")` — a soft
+dependency, so a composition without the store falls back to the environment.
+Rotating the key needs no restart, because the store's own watcher refreshes its
+snapshot.
 
 An unset key is not an error: the hosted API serves anonymous requests with
 lower rate limits, and the plugin simply omits the `Authorization` header. A
@@ -132,10 +153,10 @@ dsh plugin --profile web add @deepseek-ai/dsh-tool-context7
 
 ### Store the API key (optional)
 
-Open the Plugins page → this bundle → the row's **Configure** page → **New key**.
-The page writes it through the credentials service, so it lands in
-`$DSH_HOME/.credentials.yaml` under `refs:` and never in a patch file. Editing
-that file directly works too.
+Open the Plugins page → the **Context7 documentation** card → the row's
+**Configure** page → paste into **New key** → **Save key**. The page writes it
+through the credentials service, so it lands in `$DSH_HOME/.credentials.yaml`
+under `refs:` and never in a patch file. Editing that file directly works too.
 
 Verify composition before booting:
 
@@ -199,21 +220,55 @@ Three pieces have to line up, and the smoke test asserts all three:
 
 The form is plain JavaScript and does not import `@deepseek-ai/dsh-client-ui-primitives`:
 all elements are built with `React.createElement`, and every style resolves to a
-`--dsw-alias-*` theme token, so the page follows light/dark switching and a
-renamed token degrades appearance without breaking the slot.
+theme token (`--dsw-alias-*`, `--dsw-radius-*`), so the page follows light/dark
+switching and a renamed token degrades appearance without breaking the slot.
+Control metrics copy the host's own `sm` size — 28px tall, 12px/18px text,
+`border-radius: var(--dsw-radius-sm)` — so the form sits beside host controls
+without looking foreign.
+
+### Three things that bite when writing a row-config page
+
+Each of these produced a blank or wrong page during development, so they are
+worth knowing before copying this bundle:
+
+- **A thrown component blanks the whole entry.** The slot logs
+  `slot entry crashed in '<slot>'` to the browser console and renders nothing
+  else, so a broken form looks like an empty page rather than an error. Check the
+  console first.
+- **Never reach through `ctx.get("remote")` for a namespace.** The value is the
+  remote facade's traceable proxy; asking it for `.credentials` re-enters service
+  resolution with the dotted key and throws
+  `cannot get property "remote.credentials" without inject`. Read the namespace
+  by its full name instead: `ctx.get("remote.credentials")` returns `undefined`
+  for a name nobody provided, which degrades instead of throwing.
+- **`credentials.describe` returns a `RemoteResult` envelope** — `{ ok, value }`
+  — not the ref-to-view mapping. Reading it as the mapping yields `undefined` for
+  every field, which renders as "not set" *and* "read-only" simultaneously.
+  `set` and `unset` are plain promises that reject instead.
+
+The smoke test guards all three: it renders against a ctx whose facade raises the
+same trap, unwraps the envelope in its fixture, and runs hooks for real — a stub
+`useEffect` that never runs would hide every bug inside an effect.
 
 ---
 
-## Smoke test
+## Checks
+
+Two scripts, neither of which needs the DSH runtime:
 
 ```powershell
 cd D:/git/deepseek-tools/dsh-tool-context7
 
-# Offline: manifest/bundle wiring, localized metadata, the browser-half
-# registration contract, schema defaults, tool registration, prompt-section
-# order, per-tool switches, mount guard, live-reference updates, and
-# credential-seam precedence (fetch is stubbed for the last two)
+# Behaviour and packaging contract: manifest/bundle wiring, localized metadata,
+# the browser-half registration contract and render, schema defaults, tool
+# registration, prompt-section order, per-tool switches, mount guard,
+# live-reference updates, and credential-seam precedence (fetch is stubbed)
 node smoke-test.mjs
+
+# Prose contract: re-derives the README's claims from the code and fails when
+# they drift — versions, the slot key, which fields are page-editable, the
+# credential wire shape, the styling tokens, dictionary duplicates
+node doc-check.mjs
 
 # Also drive both tools against the Context7 API
 $env:CONTEXT7_SMOKE_LIVE = '1'
@@ -221,7 +276,7 @@ $env:CONTEXT7_API_KEY = 'ctx7sk-…'            # optional; anonymous works too
 node smoke-test.mjs
 ```
 
-The test imports the **installed** bundle by default
+`smoke-test.mjs` imports the **installed** bundle by default
 (`$DSH_HOME/profiles/<web>/node_modules/@deepseek-ai/dsh-tool-context7`), because
 the `@deepseek-ai/*` peers resolve from a profile, not from this checkout. It
 falls back to the checkout when nothing is installed. Overrides: `DSH_HOME`,
@@ -230,11 +285,16 @@ falls back to the checkout when nothing is installed. Overrides: `DSH_HOME`,
 The offline section is the packaging contract. It fails if `files` stops shipping
 `cordis.patch.yml`, the locales, the icon or `lib/client.js`; if `dsh.client`
 disappears or the client half starts importing a Harness Client package; if the
-slot key stops matching the patch's row id; if the two dictionaries drift apart;
-if a schema default disappears; if a per-tool switch stops hiding its tool; or if
-the credential store stops outranking the environment. The browser half is checked
-by capturing its `window.__ModuleLoader__.load` registration and rendering both
-views with a stubbed React, so it needs no DOM.
+slot key stops matching the patch's row id; if the two dictionaries drift apart
+or a dictionary repeats a key; if a schema default disappears; if a per-tool
+switch stops hiding its tool; or if the credential store stops outranking the
+environment.
+
+The browser half is checked by capturing its `window.__ModuleLoader__.load`
+registration and rendering both views, so it needs no DOM. The render runs hooks
+for real against a ctx that raises the Cordis inject trap and a credential
+service that answers the real `RemoteResult` envelope; two assertions also fail
+if the key input disappears, which is the state the page must never be in.
 
 ---
 
@@ -255,6 +315,26 @@ views with a stubbed React, so it needs no DOM.
 - **The page needs the settings composition.** It renders only where the profile
   mounts `config-editor` and `settings` and serves the entry as a volatile form;
   a headless profile keeps the plugin fully working but shows no page.
-- **Rendered appearance is unverified here.** The registration, slot key,
-  dictionaries, and both views were checked programmatically; the layout in a live
-  browser was not, since this session has no browser control.
+- **The key cannot be read back.** There is no "show key" control and no path
+  that returns the stored value, by design: the credential seam exposes presence,
+  source, and writability only. Re-paste to change it, or **Remove key** to clear.
+- **A page edit pins the field at the profile layer.** Config-editor writes a
+  complete override, so once a field is edited on the page its value no longer
+  follows the bundle's shipped default. **Reset** clears that override.
+- **Rendered appearance is unverified in-repo.** The registration, slot key,
+  dictionaries, both views, the styling metrics, and all 14 theme tokens were
+  checked programmatically; layout and colour in a live browser were confirmed
+  from the running Web UI, not from an automated screenshot.
+
+---
+
+## Version history
+
+| Version | Change |
+| --- | --- |
+| 1.0.0 | Ships as an installable, toggleable bundle: `dsh.bundle.patch`, locales, icon, `engines.dsh` |
+| 1.1.0 | Adds the browser half and the row configuration page. Five `Config` fields become `.volatile()`; both tools now register unconditionally and gate on a step-time `when`, so a page edit reaches the next request without a reload |
+
+The credential fixes and the styling pass since 1.1.0 are internal corrections —
+the wire shapes they addressed never worked, so no behaviour changed for anyone
+who had not opened the page yet.
