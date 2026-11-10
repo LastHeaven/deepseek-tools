@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Firecrawl 网页抓取",
+    "description": "通过原生插件接入 Firecrawl 实例的 Agent：把网页抓取为 markdown 或 HTML、做网页搜索与开发者索引搜索、枚举站点 URL、批量爬取并查询任务状态，以及解析本地 PDF、Office、HTML 文件。安装后须把配置里的 apiUrl 改为你自己的实例地址，API 密钥不入配置。"
+  }
+}

@@ -1,14 +1,18 @@
 // @deepseek-ai/dsh-tool-firecrawl
 //
-// Native Cordis tool plugin exposing the Firecrawl tools against a self-hosted
-// Firecrawl instance (default http://firecrawl.localhost, no auth). This is the
-// in-process replacement for the `firecrawl-mcp` + `firecrawl-filter.mjs`
-// stdio proxy: it registers the same seven model-facing tools directly through
-// the `tools` registry and calls the Firecrawl REST API with `fetch`, so no
-// child process, no MCP JSON-RPC layer, and no `@mendable/firecrawl-js` SDK
-// dependency are needed.
+// Native Cordis tool plugin exposing the Firecrawl tools against a Firecrawl
+// instance (self-hosted by default, no auth). It registers the seven
+// model-facing tools in-process through the `tools` registry and calls the
+// Firecrawl REST API with the built-in `fetch`, so there is no MCP server, no
+// stdio bridge, no child process, and no `@mendable/firecrawl-js` dependency.
 //
-// Verified endpoints for a self-hosted instance:
+// This package ships as a bundle: `package.json` declares `dsh.bundle.patch`
+// and the bundled `cordis.patch.yml` mounts the single `tool-firecrawl` row, so
+// `dsh plugin --profile <name> add <this package>` installs and activates it in
+// one step. Everything registered here is fiber-scoped, so the profile's
+// Plugins page (or a `disabled: true` override row) unloads it cleanly.
+//
+// Verified endpoints:
 //   POST /v1/scrape            scrape one URL
 //   POST /v2/search            web search (returns data.web)
 //   POST /v1/map               enumerate a site's URLs
@@ -22,18 +26,29 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import { readFile } from "node:fs/promises";
 import { basename, resolve as resolvePath } from "node:path";
 
-/** Cordis plugin name used by loader diagnostics. */
+/** Cordis plugin name used by loader diagnostics and the Plugins page. */
 const name = "tool-firecrawl";
-/** Services required by the tool suite. */
+/** Services required by the tool suite. Both are effect-scoped registries. */
 const inject = ["tools", "systemPrompt"];
 
 /** Default cooperative tool-call budget (ms) attached to every tool. */
 const DEFAULT_TIMEOUT_MS = 60000;
+/** Default credential reference resolved through the credential seam. */
+const DEFAULT_API_KEY_ENV = "FIRECRAWL_API_KEY";
+/** Default Firecrawl base URL. A deployment overrides it in its patch. */
+const DEFAULT_API_URL = "http://firecrawl.localhost";
 
-/** Plugin config, resolved by the loader (schemastery defaults applied). */
+/**
+ * Plugin config, resolved by the loader (schemastery defaults applied).
+ *
+ * `apiUrl` mirrors the bundled patch rather than being schema-required: the
+ * bundle has to stay mountable with a placeholder, and the loud failure for a
+ * forgotten URL lives in `apply()` where it names the fix. See the README.
+ */
 const Config = z.object({
-  apiUrl: z.string().default("http://firecrawl.localhost"),
+  apiUrl: z.string().default(DEFAULT_API_URL),
   apiKey: z.string().default(""),
+  apiKeyEnv: z.string().default(DEFAULT_API_KEY_ENV),
   scrape: z.boolean().default(true),
   search: z.boolean().default(true),
   developerSearch: z.boolean().default(true),
@@ -62,16 +77,60 @@ const SEARCH_SOURCES = ["web", "images", "news"];
 const PARSE_FORMATS = ["markdown", "html", "rawHtml", "links", "summary", "json", "query"];
 
 // ---------------------------------------------------------------------------
+// Auth: literal config key, else the credential store, else the environment
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the API key for one request.
+ *
+ * `ctx.credentials` is the harness credential seam. It is a soft dependency on
+ * purpose: a composition without the store must still work off a config literal
+ * or the process environment, so this uses `ctx.get` instead of `inject`.
+ *
+ * Deliberately NOT memoised: the store is an in-memory map, so a per-call read
+ * costs nothing, and it is what makes a rotated key reach the very next call
+ * without a restart.
+ *
+ * An instance with authentication disabled needs no key at all, so a missing
+ * key is not an error here — it simply omits the `Authorization` header.
+ */
+async function resolveApiKey(ctx, config) {
+  if (config.apiKey) return config.apiKey;
+  const ref = String(config.apiKeyEnv || DEFAULT_API_KEY_ENV);
+  const credentials = ctx.get("credentials");
+  if (credentials !== undefined) {
+    try {
+      const hit = await credentials.resolve(ref);
+      if (hit && hit.value) return hit.value;
+    } catch {
+      /* a malformed reference must not fail the plugin; fall through */
+    }
+  }
+  const fromEnv = process.env[ref];
+  return fromEnv || "";
+}
+
+// ---------------------------------------------------------------------------
 // HTTP client
 // ---------------------------------------------------------------------------
 
 function baseUrl(config) {
-  return String(config.apiUrl || "http://firecrawl.localhost").replace(/\/+$/, "");
+  const raw = String(config.apiUrl ?? "").trim();
+  // `apiUrl` carries a default, so this only fires for an explicitly blanked
+  // value — a plausible hand-edit. Fail with the fix instead of fetching
+  // "undefined/v1/scrape".
+  if (!raw) {
+    throw new Error(
+      "tool-firecrawl: `apiUrl` is empty. Set it to your Firecrawl base URL, e.g. http://firecrawl.localhost (self-hosted) or https://api.firecrawl.dev (cloud)."
+    );
+  }
+  return raw.replace(/\/+$/, "");
 }
 
-function makeHeaders(config, extra) {
+async function makeHeaders(ctx, config, extra) {
   const headers = { ...(extra || {}) };
-  if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
+  const key = await resolveApiKey(ctx, config);
+  if (key) headers.authorization = `Bearer ${key}`;
   return headers;
 }
 
@@ -87,8 +146,8 @@ function removeEmptyTopLevel(value) {
   return out;
 }
 
-async function requestJson(config, method, path, body, signal) {
-  const init = { method, headers: makeHeaders(config), signal };
+async function requestJson(ctx, config, method, path, body, signal) {
+  const init = { method, headers: await makeHeaders(ctx, config), signal };
   if (body !== undefined) {
     init.headers["content-type"] = "application/json";
     init.body = JSON.stringify(body);
@@ -214,12 +273,34 @@ function stringOutput() {
   };
 }
 
+/** Fallback order for the `TOOL_WEB_FETCH` slot, used when the registry has no accessor. */
+const TOOL_WEB_FETCH_ORDER = 2100;
+
+/**
+ * Register one prompt section in the harness's own tool-section scale.
+ *
+ * The Firecrawl guidance sits at the `TOOL_WEB_FETCH` slot so it reads next to
+ * the built-in web tools instead of landing at an arbitrary number.
+ * `getSectionOrder` is the public accessor for that scale; it only exists on a
+ * real `systemPrompt` service, so the numeric fallback keeps a hand-built ctx
+ * (smoke tests, partial registries) working. Two sections sharing one order are
+ * sorted by name, which is deterministic.
+ */
+function promptSection(ctx, sectionName, text) {
+  const source = ctx.systemPrompt;
+  let order = TOOL_WEB_FETCH_ORDER;
+  if (source !== undefined && typeof source.getSectionOrder === "function") {
+    try {
+      order = source.getSectionOrder("TOOL_WEB_FETCH");
+    } catch {
+      order = TOOL_WEB_FETCH_ORDER;
+    }
+  }
+  ctx.systemPrompt.section({ name: sectionName, order, text });
+}
+
 function applyScrapeTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:firecrawl_scrape",
-    order: 115,
-    text: "Use the firecrawl_scrape tool to retrieve the content of a specific URL through Firecrawl (a known page only). Use firecrawl_map or firecrawl_search to discover URLs, and firecrawl_crawl to collect many pages."
-  });
+  promptSection(ctx, "tool:firecrawl_scrape", "Use the firecrawl_scrape tool to retrieve the content of a specific URL through Firecrawl (a known page only). Use firecrawl_map or firecrawl_search to discover URLs, and firecrawl_crawl to collect many pages.");
   ctx.tools.register(defineTool({
     name: "firecrawl_scrape",
     description: "Retrieve and extract content from one supplied URL through Firecrawl. Use this when a specific page is identified and needs its content or defined fields. Returns markdown (default), HTML, links, a screenshot, or JSON matching a supplied schema. Set maxAge: 0 to force a live fetch.",
@@ -242,7 +323,7 @@ function applyScrapeTool(ctx, config) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const { url, ...options } = args;
-      const data = await requestJson(config, "POST", "/v1/scrape", removeEmptyTopLevel({ url, ...options }), exec.signal);
+      const data = await requestJson(ctx, config, "POST", "/v1/scrape", removeEmptyTopLevel({ url, ...options }), exec.signal);
       return truncate(formatScrape(data, url), config.maxOutputChars);
     },
     presentCall: (args) => ({ card: "generic", title: args.url, kind: "scrape", rawInput: args.url })
@@ -250,11 +331,7 @@ function applyScrapeTool(ctx, config) {
 }
 
 function applySearchTool(ctx, config) {
-  ctx.systemPrompt.section({
-    name: "tool:firecrawl_search",
-    order: 116,
-    text: "Use the firecrawl_search tool to discover current information on the web through Firecrawl. It returns ranked results; cite the relevant URLs as markdown links. For a programming question, add categories: [\"developer\"]."
-  });
+  promptSection(ctx, "tool:firecrawl_search", "Use the firecrawl_search tool to discover current information on the web through Firecrawl. It returns ranked results; cite the relevant URLs as markdown links. For a programming question, add categories: [\"developer\"].");
   ctx.tools.register(defineTool({
     name: "firecrawl_search",
     description: "Search the web through Firecrawl and return ranked results. Operators include quoted phrases, -term, site:host, inurl:term, and intitle:term. includeDomains and excludeDomains are mutually exclusive hostname filters; categories and sources limit result types.",
@@ -277,7 +354,7 @@ function applySearchTool(ctx, config) {
       if (args.includeDomains && args.excludeDomains && args.includeDomains.length && args.excludeDomains.length) {
         throw new Error("includeDomains and excludeDomains are mutually exclusive");
       }
-      const data = await requestJson(config, "POST", "/v2/search", removeEmptyTopLevel({ query, limit: limit ?? config.searchMaxResults, ...options }), exec.signal);
+      const data = await requestJson(ctx, config, "POST", "/v2/search", removeEmptyTopLevel({ query, limit: limit ?? config.searchMaxResults, ...options }), exec.signal);
       return truncate(formatSearch(data), config.maxOutputChars);
     },
     presentCall: (args) => ({ card: "generic", title: args.query, kind: "search", rawInput: args.query })
@@ -302,11 +379,11 @@ function applyDeveloperSearchTool(ctx, config) {
       if (args.skills != null) params.append("skills", args.skills);
       let data;
       try {
-        data = await requestJson(config, "GET", `/v2/search/developer?${params.toString()}`, undefined, exec.signal);
+        data = await requestJson(ctx, config, "GET", `/v2/search/developer?${params.toString()}`, undefined, exec.signal);
       } catch (error) {
         // Self-hosted instances lack the developer index; degrade to a search.
         if (String(error.message).includes("404")) {
-          data = await requestJson(config, "POST", "/v2/search", { query: args.query, limit: args.k ?? 10, categories: ["developer"] }, exec.signal);
+          data = await requestJson(ctx, config, "POST", "/v2/search", { query: args.query, limit: args.k ?? 10, categories: ["developer"] }, exec.signal);
           return truncate(formatSearch(data), config.maxOutputChars);
         }
         throw error;
@@ -334,7 +411,7 @@ function applyMapTool(ctx, config) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const { url, limit, ...options } = args;
-      const data = await requestJson(config, "POST", "/v1/map", removeEmptyTopLevel({ url, limit: limit ?? config.mapMaxResults, ...options }), exec.signal);
+      const data = await requestJson(ctx, config, "POST", "/v1/map", removeEmptyTopLevel({ url, limit: limit ?? config.mapMaxResults, ...options }), exec.signal);
       return truncate(formatMap(data, url), config.maxOutputChars);
     },
     presentCall: (args) => ({ card: "generic", title: args.url, kind: "map", rawInput: args.url })
@@ -344,7 +421,7 @@ function applyMapTool(ctx, config) {
 function applyParseTool(ctx, config) {
   ctx.tools.register(defineTool({
     name: "firecrawl_parse",
-    description: "Parse one supported document (HTML, PDF, Word, RTF, OpenDocument, spreadsheet) into markdown, HTML, links, a summary, or JSON. Reads filePath from the local filesystem and uploads it to the self-hosted Firecrawl instance. Remote web URLs belong in firecrawl_scrape.",
+    description: "Parse one supported document (HTML, PDF, Word, RTF, OpenDocument, spreadsheet) into markdown, HTML, links, a summary, or JSON. Reads filePath from the local filesystem and uploads it to the configured Firecrawl instance. Remote web URLs belong in firecrawl_scrape.",
     parameters: {
       filePath: { type: "string", required: true, description: "Absolute or relative path to a local file to parse." },
       contentType: { type: "string", description: "Optional MIME type override; inferred from the extension when omitted." },
@@ -376,7 +453,7 @@ function applyParseTool(ctx, config) {
       form.append("options", JSON.stringify(options));
       const res = await fetch(baseUrl(config) + "/v2/parse", {
         method: "POST",
-        headers: makeHeaders(config),
+        headers: await makeHeaders(ctx, config),
         body: form,
         signal: exec.signal
       });
@@ -419,7 +496,7 @@ function applyCrawlTool(ctx, config) {
     timeoutMs: config.timeoutMs,
     async execute(args, exec) {
       const { url, limit, ...options } = args;
-      const data = await requestJson(config, "POST", "/v1/crawl", removeEmptyTopLevel({ url, limit: limit ?? config.crawlMaxResults, ...options }), exec.signal);
+      const data = await requestJson(ctx, config, "POST", "/v1/crawl", removeEmptyTopLevel({ url, limit: limit ?? config.crawlMaxResults, ...options }), exec.signal);
       return formatCrawlStarted(data, url);
     },
     presentCall: (args) => ({ card: "generic", title: args.url, kind: "crawl", rawInput: args.url })
@@ -437,7 +514,7 @@ function applyCheckCrawlStatusTool(ctx, config) {
     timeoutMs: config.timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      const data = await requestJson(config, "GET", `/v1/crawl/${encodeURIComponent(args.id)}`, undefined, exec.signal);
+      const data = await requestJson(ctx, config, "GET", `/v1/crawl/${encodeURIComponent(args.id)}`, undefined, exec.signal);
       return truncate(formatCrawlStatus(data), config.maxOutputChars);
     },
     presentCall: (args) => ({ card: "generic", title: args.id, kind: "crawl", rawInput: args.id })
@@ -476,12 +553,25 @@ function inferContentType(filename) {
 // Plugin entry
 // ---------------------------------------------------------------------------
 
+/**
+ * Register the enabled Firecrawl tools.
+ *
+ * Registration is effect-based: disposing this plugin's fiber (turning the row
+ * off on the Plugins page, `disabled: true`, or HMR replacing it) unregisters
+ * every tool and prompt section, so no manual teardown is needed and no stale
+ * tool declaration survives into the next request.
+ */
 function apply(ctx, config) {
   assertPositiveInteger("timeoutMs", config.timeoutMs);
   assertPositiveInteger("searchMaxResults", config.searchMaxResults);
   assertPositiveInteger("mapMaxResults", config.mapMaxResults);
   assertPositiveInteger("crawlMaxResults", config.crawlMaxResults);
   assertPositiveInteger("maxOutputChars", config.maxOutputChars);
+
+  // Validate the URL at mount, not at the first model call: an unconfigured
+  // deployment must fail where the fix is obvious (startup log) instead of
+  // surfacing as a confusing tool error mid-conversation.
+  baseUrl(config);
 
   if (config.scrape) applyScrapeTool(ctx, config);
   if (config.search) applySearchTool(ctx, config);
@@ -492,4 +582,4 @@ function apply(ctx, config) {
   if (config.checkCrawlStatus) applyCheckCrawlStatusTool(ctx, config);
 }
 
-export { Config, DEFAULT_TIMEOUT_MS, apply, inject, name };
+export { Config, DEFAULT_API_KEY_ENV, DEFAULT_API_URL, DEFAULT_TIMEOUT_MS, apply, inject, name };

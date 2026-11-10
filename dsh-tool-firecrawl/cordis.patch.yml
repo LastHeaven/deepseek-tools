@@ -1,0 +1,58 @@
+# Firecrawl tools bundle for DSH.
+#
+# Mounts ONE row: the native `tool-firecrawl` plugin. It registers the
+# firecrawl_* tools in-process through the `tools` registry — no MCP server, no
+# stdio bridge, and no child process.
+#
+# ── INSTALL / ENABLE / DISABLE ───────────────────────────────────────────────
+# `dsh plugin --profile <name> add <path-or-package>` installs this bundle and
+# activates it in the same step. After that the row below is a normal profile
+# entry: turn it off with the Plugins page (sidebar → Plugins), with
+# `plugin_manager`, or by adding `disabled: true` to an override row of the same
+# `id` in the profile's own cordis.patch.yml. Nothing else has to change —
+# turning it off removes the firecrawl_* tool declarations from the next
+# request and keeps every setting here for the next enable.
+#
+# ── API URL ──────────────────────────────────────────────────────────────────
+# `apiUrl` is REQUIRED. There is deliberately no built-in instance: an
+# unconfigured plugin must fail loudly at mount instead of quietly scraping
+# whatever Firecrawl the author happened to develop against. The placeholder
+# below keeps this file a valid bundle; point it at your own instance, e.g.
+#
+#   apiUrl: http://firecrawl.localhost     # self-hosted, usually no auth
+#   apiUrl: https://api.firecrawl.dev      # cloud
+#
+# ── API KEY: DO NOT PUT IT HERE ──────────────────────────────────────────────
+# No key is configured. The plugin resolves the credential reference named by
+# `apiKeyEnv` (default `FIRECRAWL_API_KEY`) through the harness credential store
+# at call time, falling back to the same-named environment variable. A
+# self-hosted instance without authentication needs neither. `apiKey` exists in
+# the schema for throwaway deployments only.
+#
+# ── PER-TOOL SWITCHES ────────────────────────────────────────────────────────
+# The seven booleans default to true. Turn one off to keep a single tool out of
+# the model's schema list without disabling the whole bundle; turning a tool off
+# also drops its system-prompt section and can free request-prefix cache space.
+- insert:
+    - id: tool-firecrawl
+      name: '@deepseek-ai/dsh-tool-firecrawl'
+      config:
+        # REQUIRED — replace with your own Firecrawl base URL.
+        apiUrl: http://firecrawl.localhost
+        # Credential reference resolved at call time (store, then environment).
+        apiKeyEnv: FIRECRAWL_API_KEY
+        scrape: true
+        search: true
+        developerSearch: true
+        map: true
+        parse: true
+        crawl: true
+        checkCrawlStatus: true
+        # Cooperative per-call budget attached to every tool (ms).
+        timeoutMs: 60000
+        # Defaults applied when the model omits the matching argument.
+        searchMaxResults: 8
+        mapMaxResults: 100
+        crawlMaxResults: 50
+        # Hard cap on each tool's rendered model-facing text.
+        maxOutputChars: 200000

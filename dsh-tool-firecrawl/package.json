@@ -1,20 +1,48 @@
 {
   "name": "@deepseek-ai/dsh-tool-firecrawl",
-  "description": "Model-facing Firecrawl tools (scrape, search, map, crawl, parse, status) as a native Cordis plugin for a self-hosted Firecrawl instance",
-  "version": "0.1.0",
+  "description": "Firecrawl tools for the Web and headless profiles: scrape, search, developer search, map, crawl, crawl status and local document parsing, registered in-process against a Firecrawl instance.",
+  "version": "1.0.0",
+  "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "files": [
-    "lib/index.js"
+    "lib/index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
   ],
   "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "cordis",
+    "firecrawl",
+    "scrape",
+    "crawl",
+    "search"
+  ],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/schemastery": "*",
-    "@deepseek-ai/dsh-tools": "*"
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }
