@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Firecrawl",
-    "description": "Connects an Agent to a Firecrawl instance through a native plugin: scrape a page into markdown or HTML, search the web and a developer index, map a site's URLs, crawl many pages and poll the job status, and parse local PDF, Office or HTML files. Point apiUrl at your own instance after installing; the API key stays out of the config."
+    "description": "Connects an Agent to a Firecrawl instance through a native plugin: scrape a page into markdown or HTML, search the web and a developer index, map a site's URLs, crawl many pages and poll the job status, and parse local PDF, Office or HTML files. Point the plugin at your instance on its configuration page; the API key is stored in the credential store, not in the config."
   }
 }

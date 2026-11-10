@@ -13,11 +13,23 @@
 # turning it off removes the firecrawl_* tool declarations from the next
 # request and keeps every setting here for the next enable.
 #
+# ── EDIT THE VALUES ON THE PLUGINS PAGE ──────────────────────────────────────
+# apiUrl, apiKeyEnv, the seven tool switches and the four count limits are all
+# `.volatile()`, so the row's own configuration page on the Plugins page edits
+# them and they take effect on the next tool call without a reload. The values
+# below are the bundle's defaults: the page writes only what you change, in the
+# profile's cordis.patch.yml, so this file keeps matching the shipped defaults.
+#
+# timeoutMs is the exception. It is baked into each tool declaration, so editing
+# it here takes effect when the plugin is rebuilt. `apiKey` is likewise
+# patch-only, on purpose — see below.
+#
 # ── API URL ──────────────────────────────────────────────────────────────────
-# `apiUrl` is REQUIRED. There is deliberately no built-in instance: an
-# unconfigured plugin must fail loudly at mount instead of quietly scraping
+# `apiUrl` is REQUIRED in practice. There is deliberately no built-in instance:
+# an unconfigured plugin must fail loudly at mount instead of quietly scraping
 # whatever Firecrawl the author happened to develop against. The placeholder
-# below keeps this file a valid bundle; point it at your own instance, e.g.
+# below keeps this file a valid bundle; point it at your own instance, either
+# here or on the configuration page, e.g.
 #
 #   apiUrl: http://firecrawl.localhost     # self-hosted, usually no auth
 #   apiUrl: https://api.firecrawl.dev      # cloud
@@ -25,19 +37,22 @@
 # ── API KEY: DO NOT PUT IT HERE ──────────────────────────────────────────────
 # No key is configured. The plugin resolves the credential reference named by
 # `apiKeyEnv` (default `FIRECRAWL_API_KEY`) through the harness credential store
-# at call time, falling back to the same-named environment variable. A
-# self-hosted instance without authentication needs neither. `apiKey` exists in
-# the schema for throwaway deployments only.
+# at call time, falling back to the same-named environment variable. Paste the
+# key on the Plugins page, which writes it to $DSH_HOME/.credentials.yaml through
+# the credentials service, so the secret never enters this file or a response.
+# A self-hosted instance without authentication needs no key at all. `apiKey`
+# exists in the schema for throwaway deployments only.
 #
 # ── PER-TOOL SWITCHES ────────────────────────────────────────────────────────
-# The seven booleans default to true. Turn one off to keep a single tool out of
-# the model's schema list without disabling the whole bundle; turning a tool off
-# also drops its system-prompt section and can free request-prefix cache space.
+# The seven booleans default to true. Turn one off on the Plugins page (or here)
+# to keep a single tool out of the model's schema list without disabling the
+# whole bundle; turning a tool off also drops its system-prompt section and can
+# free request-prefix cache space. None of them needs a reload.
 - insert:
     - id: tool-firecrawl
       name: '@deepseek-ai/dsh-tool-firecrawl'
       config:
-        # REQUIRED — replace with your own Firecrawl base URL.
+        # REQUIRED in practice — replace with your own Firecrawl base URL.
         apiUrl: http://firecrawl.localhost
         # Credential reference resolved at call time (store, then environment).
         apiKeyEnv: FIRECRAWL_API_KEY

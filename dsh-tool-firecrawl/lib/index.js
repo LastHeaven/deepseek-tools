@@ -12,6 +12,10 @@
 // one step. Everything registered here is fiber-scoped, so the profile's
 // Plugins page (or a `disabled: true` override row) unloads it cleanly.
 //
+// The same package also ships a browser half (`lib/client.js`) that registers
+// this row's configuration page on the Plugins page, so the parameters below are
+// edited in the UI instead of by hand in `cordis.patch.yml`.
+//
 // Verified endpoints:
 //   POST /v1/scrape            scrape one URL
 //   POST /v2/search            web search (returns data.web)
@@ -41,30 +45,98 @@ const DEFAULT_API_URL = "http://firecrawl.localhost";
 /**
  * Plugin config, resolved by the loader (schemastery defaults applied).
  *
+ * Every field the Plugins page edits is `.volatile()`. That is what makes the
+ * page work at all: the settings service projects only volatile fields into a
+ * form, and the loader hands a volatile field to `apply()` as a live reference
+ * instead of a snapshot. The page writes through the profile's config editor,
+ * the reference is updated in place, and the next tool call reads the new value
+ * without restarting the plugin.
+ *
+ * Two fields stay ordinary, and so appear in `cordis.patch.yml` only:
+ *
+ * - `apiKey` is the patch-file escape hatch for a deployment with no credential
+ *   store. Keeping it out of the volatile projection keeps a literal secret off
+ *   the configuration wire entirely; the page edits `apiKeyEnv` and writes the
+ *   secret itself through the credential store.
+ * - `timeoutMs` is baked into each `defineTool` declaration, so a new value only
+ *   takes effect when the definitions are rebuilt.
+ *
  * `apiUrl` mirrors the bundled patch rather than being schema-required: the
  * bundle has to stay mountable with a placeholder, and the loud failure for a
- * forgotten URL lives in `apply()` where it names the fix. See the README.
+ * blanked URL lives in `apply()` and in every call where it names the fix. See
+ * the README.
  */
 const Config = z.object({
-  apiUrl: z.string().default(DEFAULT_API_URL),
+  apiUrl: z.string().default(DEFAULT_API_URL).volatile(),
   apiKey: z.string().default(""),
-  apiKeyEnv: z.string().default(DEFAULT_API_KEY_ENV),
-  scrape: z.boolean().default(true),
-  search: z.boolean().default(true),
-  developerSearch: z.boolean().default(true),
-  map: z.boolean().default(true),
-  parse: z.boolean().default(true),
-  crawl: z.boolean().default(true),
-  checkCrawlStatus: z.boolean().default(true),
-  timeoutMs: z.number().default(DEFAULT_TIMEOUT_MS),
-  searchMaxResults: z.number().default(8),
-  mapMaxResults: z.number().default(100),
-  crawlMaxResults: z.number().default(50),
-  maxOutputChars: z.number().default(200000)
+  apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV).volatile(),
+  scrape: z.boolean().default(true).volatile(),
+  search: z.boolean().default(true).volatile(),
+  developerSearch: z.boolean().default(true).volatile(),
+  map: z.boolean().default(true).volatile(),
+  parse: z.boolean().default(true).volatile(),
+  crawl: z.boolean().default(true).volatile(),
+  checkCrawlStatus: z.boolean().default(true).volatile(),
+  timeoutMs: z.number().step(1).min(1).default(DEFAULT_TIMEOUT_MS),
+  searchMaxResults: z.number().step(1).min(1).default(8).volatile(),
+  mapMaxResults: z.number().step(1).min(1).default(100).volatile(),
+  crawlMaxResults: z.number().step(1).min(1).default(50).volatile(),
+  maxOutputChars: z.number().step(1).min(1).default(200000).volatile()
 });
+
+/**
+ * Read one config value through its live reference.
+ *
+ * A `.volatile()` field arrives as `{ get() }` and an ordinary field as the
+ * value itself, so every read goes through here. Reading on use — instead of
+ * capturing a plain object once in `apply()` — is what makes a page edit reach
+ * the very next call.
+ */
+function unwrap(value) {
+  if (value !== null && typeof value === "object" && typeof value.get === "function") return value.get();
+  return value;
+}
+
+/** Flatten the config, volatile or not, into the plain values used per request. */
+function readConfig(config) {
+  return {
+    apiUrl: unwrap(config.apiUrl),
+    apiKey: unwrap(config.apiKey),
+    apiKeyEnv: unwrap(config.apiKeyEnv),
+    scrape: unwrap(config.scrape),
+    search: unwrap(config.search),
+    developerSearch: unwrap(config.developerSearch),
+    map: unwrap(config.map),
+    parse: unwrap(config.parse),
+    crawl: unwrap(config.crawl),
+    checkCrawlStatus: unwrap(config.checkCrawlStatus),
+    timeoutMs: unwrap(config.timeoutMs),
+    searchMaxResults: unwrap(config.searchMaxResults),
+    mapMaxResults: unwrap(config.mapMaxResults),
+    crawlMaxResults: unwrap(config.crawlMaxResults),
+    maxOutputChars: unwrap(config.maxOutputChars)
+  };
+}
 
 function assertPositiveInteger(label, value) {
   if (!Number.isInteger(value) || value < 1) throw new Error(`tool-firecrawl: ${label} must be a positive integer`);
+}
+
+/**
+ * Read one count cap, which the page can change — and mistype — at any time.
+ *
+ * A snapshot validated in `apply()` would go stale the moment someone edits the
+ * field, so each use re-validates. The message names the page because that is
+ * where the broken value comes from.
+ */
+function positiveInteger(settings, field) {
+  const value = settings[field];
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(
+      `tool-firecrawl: \`${field}\` must be a positive integer (got ${JSON.stringify(value)}). Set it on the plugin's configuration page.`
+    );
+  }
+  return value;
 }
 
 /** Scrape `formats` values the model may request. */
@@ -94,9 +166,9 @@ const PARSE_FORMATS = ["markdown", "html", "rawHtml", "links", "summary", "json"
  * An instance with authentication disabled needs no key at all, so a missing
  * key is not an error here — it simply omits the `Authorization` header.
  */
-async function resolveApiKey(ctx, config) {
-  if (config.apiKey) return config.apiKey;
-  const ref = String(config.apiKeyEnv || DEFAULT_API_KEY_ENV);
+async function resolveApiKey(ctx, settings) {
+  if (settings.apiKey) return settings.apiKey;
+  const ref = String(settings.apiKeyEnv || DEFAULT_API_KEY_ENV);
   const credentials = ctx.get("credentials");
   if (credentials !== undefined) {
     try {
@@ -114,11 +186,11 @@ async function resolveApiKey(ctx, config) {
 // HTTP client
 // ---------------------------------------------------------------------------
 
-function baseUrl(config) {
-  const raw = String(config.apiUrl ?? "").trim();
+function baseUrl(settings) {
+  const raw = String(settings.apiUrl ?? "").trim();
   // `apiUrl` carries a default, so this only fires for an explicitly blanked
-  // value — a plausible hand-edit. Fail with the fix instead of fetching
-  // "undefined/v1/scrape".
+  // value — a plausible hand-edit or a cleared page field. Fail with the fix
+  // instead of fetching "undefined/v1/scrape".
   if (!raw) {
     throw new Error(
       "tool-firecrawl: `apiUrl` is empty. Set it to your Firecrawl base URL, e.g. http://firecrawl.localhost (self-hosted) or https://api.firecrawl.dev (cloud)."
@@ -127,9 +199,9 @@ function baseUrl(config) {
   return raw.replace(/\/+$/, "");
 }
 
-async function makeHeaders(ctx, config, extra) {
+async function makeHeaders(ctx, settings, extra) {
   const headers = { ...(extra || {}) };
-  const key = await resolveApiKey(ctx, config);
+  const key = await resolveApiKey(ctx, settings);
   if (key) headers.authorization = `Bearer ${key}`;
   return headers;
 }
@@ -146,13 +218,13 @@ function removeEmptyTopLevel(value) {
   return out;
 }
 
-async function requestJson(ctx, config, method, path, body, signal) {
-  const init = { method, headers: await makeHeaders(ctx, config), signal };
+async function requestJson(ctx, settings, method, path, body, signal) {
+  const init = { method, headers: await makeHeaders(ctx, settings), signal };
   if (body !== undefined) {
     init.headers["content-type"] = "application/json";
     init.body = JSON.stringify(body);
   }
-  const res = await fetch(baseUrl(config) + path, init);
+  const res = await fetch(baseUrl(settings) + path, init);
   const text = await res.text();
   let data;
   try {
@@ -262,6 +334,11 @@ function truncate(text, max) {
   return s.slice(0, max) + `\n\n(Content truncated at ${max} characters.)`;
 }
 
+/** Validate the per-call output budget, which the page can change at any time. */
+function outputBudget(settings) {
+  return positiveInteger(settings, "maxOutputChars");
+}
+
 // ---------------------------------------------------------------------------
 // Tool factories
 // ---------------------------------------------------------------------------
@@ -285,6 +362,9 @@ const TOOL_WEB_FETCH_ORDER = 2100;
  * real `systemPrompt` service, so the numeric fallback keeps a hand-built ctx
  * (smoke tests, partial registries) working. Two sections sharing one order are
  * sorted by name, which is deterministic.
+ *
+ * `text` is a function so a tool switched off on the configuration page also
+ * withdraws its guidance: an empty string is dropped by assembly.
  */
 function promptSection(ctx, sectionName, text) {
   const source = ctx.systemPrompt;
@@ -299,8 +379,22 @@ function promptSection(ctx, sectionName, text) {
   ctx.systemPrompt.section({ name: sectionName, order, text });
 }
 
+/**
+ * One tool's step-time switch.
+ *
+ * The page can toggle a tool without remounting the plugin, so the decision is
+ * an activation condition the executor evaluates per step rather than a branch
+ * in `apply()`: `when` false removes the tool from both the declaration list
+ * and dispatch.
+ */
+function enabledWhen(config, field) {
+  return () => readConfig(config)[field] !== false;
+}
+
 function applyScrapeTool(ctx, config) {
-  promptSection(ctx, "tool:firecrawl_scrape", "Use the firecrawl_scrape tool to retrieve the content of a specific URL through Firecrawl (a known page only). Use firecrawl_map or firecrawl_search to discover URLs, and firecrawl_crawl to collect many pages.");
+  promptSection(ctx, "tool:firecrawl_scrape",
+    () => (readConfig(config).scrape === false ? "" :
+      "Use the firecrawl_scrape tool to retrieve the content of a specific URL through Firecrawl (a known page only). Use firecrawl_map or firecrawl_search to discover URLs, and firecrawl_crawl to collect many pages."));
   ctx.tools.register(defineTool({
     name: "firecrawl_scrape",
     description: "Retrieve and extract content from one supplied URL through Firecrawl. Use this when a specific page is identified and needs its content or defined fields. Returns markdown (default), HTML, links, a screenshot, or JSON matching a supplied schema. Set maxAge: 0 to force a live fetch.",
@@ -319,25 +413,31 @@ function applyScrapeTool(ctx, config) {
       location: { type: "object", additionalProperties: false, properties: { country: { type: "string" }, languages: { type: "array", items: { type: "string" } } }, description: "Geographic location for the request." }
     },
     output: stringOutput(),
-    timeoutMs: config.timeoutMs,
+    timeoutMs: readConfig(config).timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
+      const settings = readConfig(config);
       const { url, ...options } = args;
-      const data = await requestJson(ctx, config, "POST", "/v1/scrape", removeEmptyTopLevel({ url, ...options }), exec.signal);
-      return truncate(formatScrape(data, url), config.maxOutputChars);
+      const data = await requestJson(ctx, settings, "POST", "/v1/scrape", removeEmptyTopLevel({ url, ...options }), exec.signal);
+      return truncate(formatScrape(data, url), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.url, kind: "scrape", rawInput: args.url })
-  }));
+  }), { when: enabledWhen(config, "scrape") });
 }
 
 function applySearchTool(ctx, config) {
-  promptSection(ctx, "tool:firecrawl_search", "Use the firecrawl_search tool to discover current information on the web through Firecrawl. It returns ranked results; cite the relevant URLs as markdown links. For a programming question, add categories: [\"developer\"].");
+  promptSection(ctx, "tool:firecrawl_search",
+    () => (readConfig(config).search === false ? "" :
+      "Use the firecrawl_search tool to discover current information on the web through Firecrawl. It returns ranked results; cite the relevant URLs as markdown links. For a programming question, add categories: [\"developer\"]."));
   ctx.tools.register(defineTool({
     name: "firecrawl_search",
     description: "Search the web through Firecrawl and return ranked results. Operators include quoted phrases, -term, site:host, inurl:term, and intitle:term. includeDomains and excludeDomains are mutually exclusive hostname filters; categories and sources limit result types.",
     parameters: {
       query: { type: "string", required: true, description: "The search query." },
-      limit: { type: "number", description: `Maximum number of results to return (default ${config.searchMaxResults}).` },
+      // The default lives in config and is read per call, so it is deliberately
+      // absent from the description: a count baked into a registered schema would
+      // go stale on the first page edit.
+      limit: { type: "number", description: "Maximum number of results to return; the plugin's own default applies when omitted." },
       categories: { type: "array", items: { type: "string", enum: SEARCH_CATEGORIES }, description: "Limit results to GitHub, research, PDF, or developer sources." },
       sources: { type: "array", items: { type: "string", enum: SEARCH_SOURCES }, description: "Result source groups: web, images, or news." },
       includeDomains: { type: "array", items: { type: "string" }, description: "Only results from these hostnames." },
@@ -347,18 +447,20 @@ function applySearchTool(ctx, config) {
       filter: { type: "string", description: "Result filter expression." }
     },
     output: stringOutput(),
-    timeoutMs: config.timeoutMs,
+    timeoutMs: readConfig(config).timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
+      const settings = readConfig(config);
       const { query, limit, ...options } = args;
       if (args.includeDomains && args.excludeDomains && args.includeDomains.length && args.excludeDomains.length) {
         throw new Error("includeDomains and excludeDomains are mutually exclusive");
       }
-      const data = await requestJson(ctx, config, "POST", "/v2/search", removeEmptyTopLevel({ query, limit: limit ?? config.searchMaxResults, ...options }), exec.signal);
-      return truncate(formatSearch(data), config.maxOutputChars);
+      const capped = limit ?? positiveInteger(settings, "searchMaxResults");
+      const data = await requestJson(ctx, settings, "POST", "/v2/search", removeEmptyTopLevel({ query, limit: capped, ...options }), exec.signal);
+      return truncate(formatSearch(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.query, kind: "search", rawInput: args.query })
-  }));
+  }), { when: enabledWhen(config, "search") });
 }
 
 function applyDeveloperSearchTool(ctx, config) {
@@ -367,31 +469,32 @@ function applyDeveloperSearchTool(ctx, config) {
     description: "For a developer question — code behaviour, a library or framework, an API contract, an error message, or a known bug — search an index built for coding agents (GitHub issues, merged pull requests, repository READMEs, curated documentation). Set skills to \"only\" to search agent-skill files. On self-hosted instances without the developer index this degrades to a developer-category web search.",
     parameters: {
       query: { type: "string", required: true, description: "Natural-language developer question or search phrase." },
-      k: { type: "number", description: "Number of ranked results to return (default 10)." },
+      k: { type: "number", description: "Number of ranked results to return; the plugin's own default applies when omitted." },
       skills: { type: "string", enum: ["only"], description: "Set to \"only\" to search only agent-skill files." }
     },
     output: stringOutput(),
-    timeoutMs: config.timeoutMs,
+    timeoutMs: readConfig(config).timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
+      const settings = readConfig(config);
       const params = new URLSearchParams({ query: args.query });
       if (args.k != null) params.append("k", String(args.k));
       if (args.skills != null) params.append("skills", args.skills);
       let data;
       try {
-        data = await requestJson(ctx, config, "GET", `/v2/search/developer?${params.toString()}`, undefined, exec.signal);
+        data = await requestJson(ctx, settings, "GET", `/v2/search/developer?${params.toString()}`, undefined, exec.signal);
       } catch (error) {
         // Self-hosted instances lack the developer index; degrade to a search.
         if (String(error.message).includes("404")) {
-          data = await requestJson(ctx, config, "POST", "/v2/search", { query: args.query, limit: args.k ?? 10, categories: ["developer"] }, exec.signal);
-          return truncate(formatSearch(data), config.maxOutputChars);
+          data = await requestJson(ctx, settings, "POST", "/v2/search", { query: args.query, limit: args.k ?? 10, categories: ["developer"] }, exec.signal);
+          return truncate(formatSearch(data), outputBudget(settings));
         }
         throw error;
       }
-      return truncate(formatDeveloper(data), config.maxOutputChars);
+      return truncate(formatDeveloper(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.query, kind: "search", rawInput: args.query })
-  }));
+  }), { when: enabledWhen(config, "developerSearch") });
 }
 
 function applyMapTool(ctx, config) {
@@ -403,19 +506,21 @@ function applyMapTool(ctx, config) {
       search: { type: "string", description: "Optional term to narrow the URL list." },
       sitemap: { type: "string", enum: ["include", "skip", "only"], description: "Sitemap handling." },
       includeSubdomains: { type: "boolean", description: "Include subdomains." },
-      limit: { type: "number", description: `Maximum URLs to return (default ${config.mapMaxResults}).` },
+      limit: { type: "number", description: "Maximum URLs to return; the plugin's own default applies when omitted." },
       ignoreQueryParameters: { type: "boolean", description: "Ignore query parameters when deduplicating." }
     },
     output: stringOutput(),
-    timeoutMs: config.timeoutMs,
+    timeoutMs: readConfig(config).timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
+      const settings = readConfig(config);
       const { url, limit, ...options } = args;
-      const data = await requestJson(ctx, config, "POST", "/v1/map", removeEmptyTopLevel({ url, limit: limit ?? config.mapMaxResults, ...options }), exec.signal);
-      return truncate(formatMap(data, url), config.maxOutputChars);
+      const capped = limit ?? positiveInteger(settings, "mapMaxResults");
+      const data = await requestJson(ctx, settings, "POST", "/v1/map", removeEmptyTopLevel({ url, limit: capped, ...options }), exec.signal);
+      return truncate(formatMap(data, url), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.url, kind: "map", rawInput: args.url })
-  }));
+  }), { when: enabledWhen(config, "map") });
 }
 
 function applyParseTool(ctx, config) {
@@ -433,9 +538,10 @@ function applyParseTool(ctx, config) {
       pdfOptions: { type: "object", additionalProperties: false, properties: { maxPages: { type: "integer" } }, description: "PDF parsing options." }
     },
     output: stringOutput(),
-    timeoutMs: config.timeoutMs,
+    timeoutMs: readConfig(config).timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
+      const settings = readConfig(config);
       const absPath = resolvePath(args.filePath);
       const buffer = await readFile(absPath);
       const filename = basename(absPath);
@@ -451,9 +557,9 @@ function applyParseTool(ctx, config) {
       const form = new FormData();
       form.append("file", new Blob([new Uint8Array(buffer)], { type: contentType }), filename);
       form.append("options", JSON.stringify(options));
-      const res = await fetch(baseUrl(config) + "/v2/parse", {
+      const res = await fetch(baseUrl(settings) + "/v2/parse", {
         method: "POST",
-        headers: await makeHeaders(ctx, config),
+        headers: await makeHeaders(ctx, settings),
         body: form,
         signal: exec.signal
       });
@@ -468,10 +574,10 @@ function applyParseTool(ctx, config) {
         const detail = typeof data === "object" && data !== null ? (data.error || data.message || text) : text;
         throw new Error(`firecrawl POST /v2/parse failed (HTTP ${res.status}): ${String(detail).slice(0, 500)}`);
       }
-      return truncate(formatParse(data), config.maxOutputChars);
+      return truncate(formatParse(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.filePath, kind: "parse", rawInput: args.filePath })
-  }));
+  }), { when: enabledWhen(config, "parse") });
 }
 
 function applyCrawlTool(ctx, config) {
@@ -480,7 +586,7 @@ function applyCrawlTool(ctx, config) {
     description: "Start a multi-page crawl at a website URL through Firecrawl and return the job id. Poll the job with firecrawl_check_crawl_status until it reaches completed or failed. Scope with include/exclude paths, depth, page limit, and subdomain/external-link controls. Returns the crawl id.",
     parameters: {
       url: { type: "string", required: true, description: "The website URL to crawl." },
-      limit: { type: "number", description: `Maximum pages to crawl (default ${config.crawlMaxResults}).` },
+      limit: { type: "number", description: "Maximum pages to crawl; the plugin's own default applies when omitted." },
       maxDiscoveryDepth: { type: "number", description: "Maximum link depth to discover." },
       includePaths: { type: "array", items: { type: "string" }, description: "Only crawl URLs matching these path patterns." },
       excludePaths: { type: "array", items: { type: "string" }, description: "Skip URLs matching these path patterns." },
@@ -493,14 +599,16 @@ function applyCrawlTool(ctx, config) {
       scrapeOptions: { type: "object", additionalProperties: false, properties: { formats: { type: "array", items: { type: "string", enum: SCRAPE_FORMATS } }, onlyMainContent: { type: "boolean" }, waitFor: { type: "number" } }, description: "Per-page scrape options." }
     },
     output: stringOutput(),
-    timeoutMs: config.timeoutMs,
+    timeoutMs: readConfig(config).timeoutMs,
     async execute(args, exec) {
+      const settings = readConfig(config);
       const { url, limit, ...options } = args;
-      const data = await requestJson(ctx, config, "POST", "/v1/crawl", removeEmptyTopLevel({ url, limit: limit ?? config.crawlMaxResults, ...options }), exec.signal);
+      const capped = limit ?? positiveInteger(settings, "crawlMaxResults");
+      const data = await requestJson(ctx, settings, "POST", "/v1/crawl", removeEmptyTopLevel({ url, limit: capped, ...options }), exec.signal);
       return formatCrawlStarted(data, url);
     },
     presentCall: (args) => ({ card: "generic", title: args.url, kind: "crawl", rawInput: args.url })
-  }));
+  }), { when: enabledWhen(config, "crawl") });
 }
 
 function applyCheckCrawlStatusTool(ctx, config) {
@@ -511,14 +619,15 @@ function applyCheckCrawlStatusTool(ctx, config) {
       id: { type: "string", required: true, description: "The crawl job id returned by firecrawl_crawl." }
     },
     output: stringOutput(),
-    timeoutMs: config.timeoutMs,
+    timeoutMs: readConfig(config).timeoutMs,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      const data = await requestJson(ctx, config, "GET", `/v1/crawl/${encodeURIComponent(args.id)}`, undefined, exec.signal);
-      return truncate(formatCrawlStatus(data), config.maxOutputChars);
+      const settings = readConfig(config);
+      const data = await requestJson(ctx, settings, "GET", `/v1/crawl/${encodeURIComponent(args.id)}`, undefined, exec.signal);
+      return truncate(formatCrawlStatus(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.id, kind: "crawl", rawInput: args.id })
-  }));
+  }), { when: enabledWhen(config, "checkCrawlStatus") });
 }
 
 /** Guess a MIME type from a filename extension. */
@@ -554,32 +663,43 @@ function inferContentType(filename) {
 // ---------------------------------------------------------------------------
 
 /**
- * Register the enabled Firecrawl tools.
+ * Register the Firecrawl tools.
  *
  * Registration is effect-based: disposing this plugin's fiber (turning the row
  * off on the Plugins page, `disabled: true`, or HMR replacing it) unregisters
  * every tool and prompt section, so no manual teardown is needed and no stale
  * tool declaration survives into the next request.
+ *
+ * All seven tools are always registered; the per-tool switches are step-time
+ * `when` conditions, and their prompt text is resolved per assembly. A page edit
+ * therefore takes effect on the next request instead of waiting for a reload.
  */
 function apply(ctx, config) {
-  assertPositiveInteger("timeoutMs", config.timeoutMs);
-  assertPositiveInteger("searchMaxResults", config.searchMaxResults);
-  assertPositiveInteger("mapMaxResults", config.mapMaxResults);
-  assertPositiveInteger("crawlMaxResults", config.crawlMaxResults);
-  assertPositiveInteger("maxOutputChars", config.maxOutputChars);
+  const initial = readConfig(config);
+  assertPositiveInteger("timeoutMs", initial.timeoutMs);
 
   // Validate the URL at mount, not at the first model call: an unconfigured
   // deployment must fail where the fix is obvious (startup log) instead of
-  // surfacing as a confusing tool error mid-conversation.
-  baseUrl(config);
+  // surfacing as a confusing tool error mid-conversation. A page edit that
+  // blanks it is caught per call by `baseUrl`.
+  baseUrl(initial);
 
-  if (config.scrape) applyScrapeTool(ctx, config);
-  if (config.search) applySearchTool(ctx, config);
-  if (config.developerSearch) applyDeveloperSearchTool(ctx, config);
-  if (config.map) applyMapTool(ctx, config);
-  if (config.parse) applyParseTool(ctx, config);
-  if (config.crawl) applyCrawlTool(ctx, config);
-  if (config.checkCrawlStatus) applyCheckCrawlStatusTool(ctx, config);
+  applyScrapeTool(ctx, config);
+  applySearchTool(ctx, config);
+  applyDeveloperSearchTool(ctx, config);
+  applyMapTool(ctx, config);
+  applyParseTool(ctx, config);
+  applyCrawlTool(ctx, config);
+  applyCheckCrawlStatusTool(ctx, config);
 }
 
-export { Config, DEFAULT_API_KEY_ENV, DEFAULT_API_URL, DEFAULT_TIMEOUT_MS, apply, inject, name };
+export {
+  Config,
+  DEFAULT_API_KEY_ENV,
+  DEFAULT_API_URL,
+  DEFAULT_TIMEOUT_MS,
+  TOOL_WEB_FETCH_ORDER,
+  apply,
+  inject,
+  name
+};
