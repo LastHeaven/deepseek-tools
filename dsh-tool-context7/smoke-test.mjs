@@ -319,6 +319,12 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
   check("client avoids JSX and TypeScript", !/<[A-Za-z][A-Za-z0-9]*[\s/>]/.test(clientSource.replace(/\/\/.*$/gm, "")), "no JSX in the browser half");
   check("client imports no Harness Client package", !/require\(["']@deepseek-ai\//.test(clientSource), "no @deepseek-ai require");
   check("client styles by theme token only", !/:\s*#[0-9a-fA-F]{3,8}\b/.test(clientSource), "no literal hex colors");
+
+  // Buttons and inputs must not be squeezed by their flex row: a wrapped label
+  // ("保存密/钥") is what an unspecified button width produces.
+  check("buttons keep their own width", /\.tc7-button\s*\{[^}]*flex:\s*0 0 auto/.test(clientSource));
+  check("buttons do not wrap their label", /\.tc7-button\s*\{[^}]*white-space:\s*nowrap/.test(clientSource));
+  check("the key input flexes and may shrink", /\.tc7-secretRow\s*>\s*\.tc7-input\s*\{[^}]*min-width:\s*0/.test(clientSource));
 }
 
 // ---------------------------------------------------------------------------

@@ -150,14 +150,19 @@ window.__ModuleLoader__.load({
 .tc7-labelRow { display: flex; align-items: center; gap: 8px; min-height: 20px; }
 .tc7-label { font-size: 13px; font-weight: 500; color: var(--dsw-alias-label-primary); }
 .tc7-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-secondary); }
+
+/* Inputs follow the host's field metrics: 28px tall, 13px text, radius-sm. */
 .tc7-input {
-  box-sizing: border-box; width: 100%; padding: 6px 10px; font: inherit; font-size: 13px;
+  box-sizing: border-box; width: 100%; height: 28px; padding: 0 10px;
+  font: inherit; font-size: 13px; line-height: 26px;
   color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base);
-  border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-sm);
 }
+.tc7-input::placeholder { color: var(--dsw-alias-label-secondary); }
 .tc7-input:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
 .tc7-input:disabled { opacity: .55; }
 .tc7-input[aria-invalid="true"] { border-color: var(--dsw-alias-state-error-primary); }
+
 .tc7-row { display: flex; align-items: flex-start; gap: 10px; }
 .tc7-rowText { display: flex; flex-direction: column; gap: 4px; }
 .tc7-switch {
@@ -172,23 +177,36 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-bg-base); transition: transform .15s ease;
 }
 .tc7-switch[aria-checked="true"] .tc7-knob { transform: translateX(14px); }
+
 .tc7-badge {
-  padding: 1px 7px; font-size: 11px; border-radius: 999px;
+  padding: 1px 7px; font-size: 11px; border-radius: 999px; white-space: nowrap;
   color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-2);
   border: 1px solid var(--dsw-alias-border-l1);
 }
+
+/* Buttons copy the host's sm size: inline-flex, 28px, 12px text, never wrapped. */
 .tc7-button {
-  align-self: flex-start; padding: 5px 12px; font: inherit; font-size: 12px; cursor: pointer;
+  box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto; height: 28px; padding: 0 10px; margin: 0;
+  font: inherit; font-size: 12px; line-height: 18px; white-space: nowrap; cursor: pointer;
   color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-1);
-  border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-sm);
 }
 .tc7-button:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2); }
 .tc7-button:disabled { opacity: .55; cursor: default; }
 .tc7-buttonPrimary {
-  color: var(--dsw-alias-bg-base); background: var(--dsw-alias-brand-primary);
-  border-color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+  background: var(--dsw-alias-button-primary-fill); border-color: var(--dsw-alias-button-primary-fill);
 }
-.tc7-buttonText { border-color: transparent; background: transparent; padding: 2px 6px; }
+@media (hover: hover) {
+  .tc7-buttonPrimary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
+}
+.tc7-buttonText {
+  height: 20px; padding: 0 6px; border-color: transparent; background: transparent;
+  color: var(--dsw-alias-label-secondary); text-decoration: underline;
+}
+.tc7-buttonText:hover:not(:disabled) { background: transparent; color: var(--dsw-alias-label-primary); }
+
 .tc7-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .tc7-status { font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .tc7-statusError { font-size: 12px; color: var(--dsw-alias-state-error-primary); }
@@ -200,13 +218,14 @@ window.__ModuleLoader__.load({
   text-transform: uppercase; color: var(--dsw-alias-label-secondary);
 }
 .tc7-keyLine { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.tc7-keyValue { font-size: 12px; color: var(--dsw-alias-label-primary); }
-.tc7-secretRow { display: flex; gap: 8px; align-items: flex-start; }
-.tc7-secretRow .tc7-input { flex: 1 1 auto; }
+.tc7-keyValue { font-size: 12px; line-height: 20px; color: var(--dsw-alias-label-primary); }
+/* The key row is one line: the field grows, the button keeps its own width. */
+.tc7-secretRow { display: flex; align-items: center; gap: 8px; }
+.tc7-secretRow > .tc7-input { flex: 1 1 auto; min-width: 0; }
 .tc7-note {
   margin: 0; padding: 10px 12px; font-size: 12px; line-height: 1.6;
   color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-1);
-  border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-sm);
 }
 `;
 
