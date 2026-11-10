@@ -1,32 +1,57 @@
 {
   "name": "@deepseek-ai/dsh-build-panel",
-  "description": "Sidebar panel and /build command that browse and drive docs/<task> workflows (the DSH equivalent of the opencode build command)",
-  "version": "0.1.0",
+  "description": "Sidebar Build panel and /build command that browse and drive docs/<task> workflows: list the task directories, read plan/todo/archive, and hand one task's workflow to the current Agent. Ships as a bundle, so the Plugins page installs, enables and disables both halves together.",
+  "version": "1.0.0",
+  "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "files": [
     "lib/index.js",
-    "lib/client.js"
+    "lib/client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
   ],
   "license": "MIT",
-  "dsh": {
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-api-remotes",
-        "@deepseek-ai/dsh-client-ui-sidebar"
-      ],
-      "platform": "web"
-    }
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "cordis",
+    "build",
+    "workflow",
+    "sidebar"
+  ],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.0 <0.3.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-commands": "*",
+    "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-typert-protocol": "*"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
   }
 }

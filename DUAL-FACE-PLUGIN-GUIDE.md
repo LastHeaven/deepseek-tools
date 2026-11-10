@@ -347,17 +347,43 @@ Slot 组件会收到三类 props（合并后传入，来自
 
 这是双端插件最容易踩坑的地方。
 
-### 8.1 结论：复用现成的 `remote.commands`，别自建 Typert remote
+### 8.1 两条可用通道，选一条
 
-- Client→Host 的「干净」通道是 Typert Remote（`harness.handle`/`host.call` 那套是
-  **动态插件** cordis_define 专用的，静态 npm 插件用不了）。
-- 但静态插件的 Typert remote namespace 是**编译期生成并硬编码**在
-  `@deepseek-ai/dsh-api-remotes/lib/client.js` 里的（只有 `commands`、`goals`、
-  `fileReferences`、`pluginInventory`、`messageFeedback`、`sessionReferenceResolver`、
-  `dynamicCordisRunner` 七个）。自定义插件**无法凭空加 namespace**——除非你自己跑
-  Typert 构建流水线产出 `lib/typert.remote-client.js`，那需要完整 monorepo 环境，
-  成本极高。
-- 所以务实做法是：**复用已挂载的 `remote.commands`**。
+Client→Host 有两种干净做法，`dsh-build-panel` 同时演示了这两种：
+
+| 通道 | 怎么用 | 代价 | 什么时候用 |
+| --- | --- | --- | --- |
+| **复用 `remote.commands`** | `remote.commands.execute(sessionId, line, [])`，把 JSON 塞进命令的 `text` 回传 | 每次查询都会记一条 `command/run` + `command/done` 到会话日志 | 数据本来就和某个命令相关，或者查询量很小 |
+| **自己挂一个 Typert Remote 服务** | Host 半 `class X extends TypertRemoteService`，方法打 `@Remote` 标记；Client 半直接 `fetch("/api/<ns>/<method>")` | 要自己拼 RPC 信封 | **纯 UI 读**，不该进会话日志（列表、详情、预览） |
+
+**推翻一个常见误解**：自定义插件**可以**有自己的 namespace。网关并不依赖客户端那张
+硬编码表——它在 host 侧按 `serviceRegistry` 扫描带 `typertRemote` 绑定的服务，端点是
+`endpointOf(namespace, method)`（见 `@deepseek-ai/dsh-api-gateway/lib/index.js`）。
+`dsh-build-panel` 的 `buildPanel/list`、`buildPanel/overview` 就是这么来的，而
+`@deepseek-ai/dsh-api-remotes/lib/client.js` 里根本没有 `buildPanel` 这个词。
+
+差别在于**浏览器半怎么调**：
+
+- 已有 namespace（`commands` 等）走 `remote.commands.execute(...)`，`dsh-api-remotes`
+  已经生成好类型化的客户端。
+- 自己的 namespace 没有被预生成进客户端表，所以浏览器半用**原始 `fetch`** 拼同一个
+  信封：
+
+  ```js
+  await fetch("/api/buildPanel/" + endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "client-request",
+      rpcId,
+      method: "buildPanel/" + endpoint,
+      payload: { args }
+    })
+  });
+  // → { type: "server-response", rpcId, result: { ok, value } | { ok: false, error } }
+  ```
+
+  这是同源请求，页面已有的登录态（cookie）自动带上，所以不需要自己处理鉴权。
 
 ### 8.2 用 `remote.commands.execute` 回传数据
 
@@ -380,6 +406,38 @@ const res = await remote.commands.execute(sessionId, line, []);
 - 代价：会记一条 `command/run`/`command/done` 到会话日志。对「查询类」命令（面板
   拉数据）可接受；**不要用这条通道做「驱动 agent 干活」**——那应该走
   `agent.followup()`（第 5 节），因为 `followup` 进模型上下文，`command` 不进。
+
+### 8.2.1 自己挂 Typert Remote 服务
+
+Host 半：
+
+```js
+import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+
+class BuildPanelService extends TypertRemoteService {
+  constructor(ctx) {
+    super(ctx, "buildPanel");     // 服务名 = 默认 wire namespace
+    this.sessions = ctx.sessions;
+  }
+  async list(sessionId) { /* … */ }
+  async overview(sessionId, id) { /* … */ }
+}
+```
+
+方法要能被网关发现，必须带 `@Remote` 标记。`dsh-build-panel` 没有 TS 装饰器环境，
+所以它手工跑了一遍装饰器写的那张表（`Remote(proto[method], { kind: "method", name, … })`
++ 每个 initializer 在实例上执行一次）。照抄那一段即可，注意 `remoteMethods()` 是
+**按 prototype 记账的 WeakMap**，initializer 必须在 `Object.create(proto)` 的探针上跑，
+不能只跑在某个实例上。
+
+要点：
+
+- 服务名就是 wire namespace，**不要**在里面放 `/`。
+- 参数名是**线上字段**，改了就是破坏兼容，命名要当 API 对待。
+- `super(ctx, name)` 是 `Service` 的注册，所以插件 fiber 卸载时它自动注销——这就是
+  「停用插件后面板连不上后端」的机制，不需要手写清理。
+- 服务里读 `node:fs` 是**真的宿主进程**，不是 sandbox；路径来自
+  `session.header.cwd`，不要硬编码。
 
 ### 8.3 嵌套服务访问的正确写法
 
@@ -469,6 +527,18 @@ const agent = {
 
 验证：`list`/`overview`/`run` 三个分支的返回、`followup` 是否被触发。
 
+**用真的 Cordis `Context`，不要手写 `{ get }` 桩**。注册都是 effect：假 ctx 的
+`commands.register` 如果只是 `push` 进数组，fiber 卸载后那个数组不会变——你会以为
+插件泄漏了注册，其实是桩没有 effect 语义。`dsh-build-panel` 的做法是把假注册表写成
+真的 `Service`，`register` 里用 `this.ctx.effect(...)`（`this.ctx` 是指向调用方 fiber
+的 traceable 引用），然后 `ctx.plugin(...)` 挂载、`await fiber.dispose()` 卸载，断言
+服务与命令**都**消失。
+
+同理，测试 `docs/` 这类文件读取时**自己造 fixture**（`mkdtemp` + 写入已知顺序、
+已知状态的文件），不要去读开发者机器上的真实目录 —— 否则测试只能在有那个目录的机器
+上跑，而且断言会随别人的数据变化。`utimes()` 可以精确控制 mtime，用来断言「按
+plan.md 时间倒序」。
+
 双端包的 Host 半冒烟还要顺带断言**清单契约**（和 `dsh-tool-firecrawl` 的离线段
 同一套做法）：`dsh.bundle.patch` 存在、`dsh.client.platform === "web"`、
 `files` 同时含 `cordis.patch.yml` 与 `lib/client.js`、`exports["./client"]` 存在。
@@ -476,12 +546,30 @@ const agent = {
 
 ### 10.2 Client 半冒烟（不打开浏览器）
 
-写 `smoke-test-client.mjs`，用 `new Function("window","document","require", code)`
-执行 client bundle 源码，用假 `__ModuleLoader__`、假 `react`、假 `slots` 服务驱动
-`apply()`，验证：bundle 注册、`inject` 数组、slot 注册成功、组件能渲染。
+用 `new Function("window","document","require", code)` 执行 client bundle 源码，用假
+`__ModuleLoader__`、假 `react`、假 `slots` 服务驱动 `apply()`，验证：bundle 注册、
+`inject` 数组、slot 注册成功、组件能渲染。
 
 假 react 只需 `{ createElement, Fragment, useState, useEffect, useLayoutEffect,
-useRef, useCallback }`（组件里用到哪个补哪个）。
+useRef, useCallback }`（组件里用到哪个补哪个）。但**必须是真的会跑的**：
+
+- `createElement` 要把 children **同时折进 props**（`props.children`），否则读
+  `props.children` 的组件渲染成空，断言「渲染了 N 个控件」会永远拿到 0 而误过。
+- `useState` 要真的驱动重渲染，`useEffect` 要真的执行 —— 一个 no-op `useEffect`
+  会把所有 effect 里的 bug 全部藏起来（凭据查询崩溃进浏览器就是这么漏掉的）。
+- 渲染器遇到 `typeof type === "function"` 要**展开函数组件**再继续走，否则
+  `h(ToggleRow, …)` 这种节点不会展开，计数断言同样拿到 0。
+
+`dsh-build-panel` 把 Host 与 Client 的检查放在**同一个 `smoke-test.mjs`** 里，并用
+**真的会跑的迷你 React** 走完整点击路径：打开面板 → 选任务 → 读详情 → 点「执行此任务」
+→ 断言发出的命令串与目标会话。它还断言徽章**不是** disabled 变体 —— 会话选择器写错
+（例如读早已不存在的 `state.current`）只会静默退化成「无会话」，不会报错。
+
+写冒烟测试时最容易自欺的一点：**测试跑的是「已安装」的那份，不是你正在改的那份**。
+`smoke-test.mjs` 默认 import
+`$DSH_HOME/profiles/<p>/node_modules/@deepseek-ai/<包>`，所以要让它测某个副本，必须
+显式给覆盖变量（`BUILD_PANEL_PLUGIN=<file:///…>`）。验完一定要做一次**反向验证**：
+故意改坏一处，确认断言真的会红 —— 不然「全绿」可能只是没测到。
 
 ### 10.3 接线冒烟（真实 host）
 
@@ -530,32 +618,26 @@ Invoke-WebRequest "http://127.0.0.1:3080/plugins/@deepseek-ai/dsh-my-plugin/clie
 
 ```
 dsh-build-panel/
-  package.json           # 双端声明：main + exports["./client"] + dsh.client
-  lib/index.js           # Host 半：/build 命令 + node:fs 读写 docs/<任务号>/
+  package.json           # 双端声明 + dsh.bundle + dsh.client + engines + icon
+  cordis.patch.yml       # bundle 层：一行 build-panel（无 config，插件无 Config）
+  locale/{en,zh}.json    # 插件页标题与描述
+  icon.svg               # 插件页图标
+  lib/index.js           # Host 半：buildPanel Remote 服务 + /build 命令
   lib/client.js          # Client 半：sidebar.footer.action 面板
-  smoke-test.mjs         # Host 冒烟
-  smoke-test-client.mjs  # Client 冒烟
+  smoke-test.mjs         # Host 三分支 + Client 点击路径（同一个文件跑完）
+  doc-check.mjs          # README 与代码的一致性
+  README.md
 ```
 
 它演示了本指南的每个要点：
 
-- `/build` 命令三个分支：列表（JSON 回传）、详情（JSON 回传）、执行（`agent.followup`）。
+- `/build <任务号> run` 一个分支：`agent.followup` 下达工作流指令。
+- 浏览走**专用 Typert Remote 服务**（`buildPanel/list`、`buildPanel/overview`），
+  不进会话事件、不进模型上下文；下达走 `/build` 命令。两条链路刻意分开。
 - 用 `node:fs/promises` 直接读工作区文件，不碰 sandbox。
 - 面板：`sidebar.footer.action` 注册 + `useSessions` 拿会话 + `position: fixed` 悬浮层。
-- Client→Host 用 `remote.commands.execute` 回传 JSON，零自建 RPC。
 - 把 opencode 的 `build.md` 工作流改写成 `agent.followup` 的指令文本，实现同等效果。
+- **双端包也声明 `dsh.bundle`**：一条 `dsh plugin add` 同时接管 Host 半与 client 半的
+  启停（清单写法见第 3 节）。这个包没有 `Config`，所以插件页上只有开关、没有配置页 ——
+  那是正确形态，不是漏打包。
 
-> **注意**：`dsh-build-panel` 目前仍是**裸模块**形态（只有 `package.json` +
-> `lib/`，靠手工拷贝 + 手写 `cordis.patch.yml` 接线），所以它**不出现在插件页、
-> 无法用开关启停**。要升级成第 3 节那种双端 bundle，补上：
->
-> 1. `package.json` 加 `dsh.bundle`、`engines.dsh`、`icon`，并把
->    `cordis.patch.yml`、`locale/*.json`、`icon.svg` 加进 `exports` 与 `files`；
-> 2. 新增 `cordis.patch.yml`，一行 `id: build-panel` / `name: '@deepseek-ai/dsh-build-panel'`；
-> 3. 新增 `locale/en.json`、`locale/zh.json` 与 `icon.svg`；
-> 4. 用 `dsh plugin --profile web add D:/git/deepseek-tools/dsh-build-panel` 重装，
->    让它进入 `dsh.profile.bundles`（这一步是「可管理」的前提，手工拷贝做不到）。
->
-> 单端工具插件升级成 bundle 的完整对照，见
-> [`dsh-tool-firecrawl`](dsh-tool-firecrawl/README.md) 与
-> `PLUGIN-DEVELOPMENT-GUIDE.md` 第 4～7 节。

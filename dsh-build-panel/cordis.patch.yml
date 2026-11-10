@@ -1,0 +1,48 @@
+# Build workflow bundle for DSH.
+#
+# Mounts ONE row: the native `build-panel` plugin. It has two halves in the same
+# package, and both are fiber-scoped effects of this single row:
+#
+#   - Host half (`lib/index.js`): a Typert Remote service on the `buildPanel`
+#     namespace serving `list`/`overview`, plus the `/build <task> run` command.
+#   - Client half (`lib/client.js`): the sidebar footer badge and the floating
+#     panel that reads those two methods and drives the command.
+#
+# ── INSTALL / ENABLE / DISABLE ───────────────────────────────────────────────
+# `dsh plugin --profile <name> add <path-or-package>` installs this bundle and
+# activates it in the same step. After that the row below is a normal profile
+# entry: turn it off with the Plugins page (sidebar → Plugins), with
+# `plugin_manager`, or by adding `disabled: true` to an override row of the same
+# `id` in the profile's own cordis.patch.yml.
+#
+# Disabling unloads the fiber, so BOTH halves go together: the `/build` command
+# disappears from the slash menu, the `buildPanel` Remote service stops serving,
+# and the sidebar badge is no longer registered. Re-enabling restores both from
+# this same configuration — nothing else has to change. The browser half needs a
+# page refresh to disappear or reappear, because an already-loaded client bundle
+# is not unloaded by a Host-side reload.
+#
+# ── NO CONFIGURATION ────────────────────────────────────────────────────────
+# There is nothing to point at and nothing to authenticate: the task list is read
+# from `docs/` under the session's own working directory through node:fs, and the
+# workflow instruction is a fixed template. The plugin therefore declares no
+# `Config`, so this row carries no `config:` block and the row has no
+# configuration page — only the enable/disable switch.
+#
+# ── WHERE THE TASKS COME FROM ───────────────────────────────────────────────
+# The session's working directory, resolved per call, so a session that changes
+# directory sees the matching `docs/`. A session without a working directory is
+# reported as an error in the panel rather than as an empty list.
+#
+#   docs/<task>/index.md     reference-file index (maintained by the agent)
+#   docs/<task>/plan.md      the execution target (mtime orders the panel)
+#   docs/<task>/todo/*.md    pending items, `状态:` in the frontmatter
+#   docs/<task>/finish/*.md  completed items
+#   docs/<task>/plans/*.md   archived plans
+#   docs/<task>/archive.md   append-only hand-off table
+#
+# A missing docs/ directory is an empty list, not an error: a workspace that has
+# never used the workflow simply shows "no task directories".
+- insert:
+    - id: build-panel
+      name: '@deepseek-ai/dsh-build-panel'

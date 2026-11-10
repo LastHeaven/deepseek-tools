@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Build 工作流",
+    "description": "在侧边栏加一个 Build 面板，并注册 /build 命令。面板按 plan.md 更新时间倒序列出当前工作区 docs/ 下的任务目录，展开可见执行目标 plan、待办 todo 与最近交接 archive；「执行此任务」把该任务的工作流指令交给当前会话的 Agent。两半属于同一个 bundle，停用插件时面板与命令一起消失。"
+  }
+}

@@ -797,13 +797,36 @@ dsh-tool-firecrawl/
 `apiUrl` 由 schema `required()`，bundle patch 里放占位值；未配置时启动期即报错。
 17 个工具、写操作与只读操作的 `isConcurrencySafe` 区分、`tokenEnv` 凭据引用都在这里。
 
+### `dsh-build-panel/` —— 双端 bundle（Host 命令 + 浏览器面板）
+
+同一个包里同时声明 `dsh.bundle` 与 `dsh.client`，所以一条 `dsh plugin add` 就完成了
+「Host 半可加载」「client 半进 boot graph」「插件页可启停」三件事。
+
+```
+dsh-build-panel/
+  package.json          # dsh.bundle + dsh.client + engines + icon + exports/files
+  cordis.patch.yml      # bundle 层：一行 build-panel，无 config（插件无 Config）
+  locale/en.json        # 插件页标题与描述
+  locale/zh.json
+  icon.svg
+  lib/index.js          # Host 半：buildPanel Remote 服务 + /build 命令
+  lib/client.js         # Client 半：sidebar.footer.action 面板
+  smoke-test.mjs        # 离线契约 + Host 三分支 + Client 点击路径
+  doc-check.mjs         # README 与代码的一致性
+  README.md
+```
+
+它演示了两件事：**双端包怎么装成一个可启停的 bundle**，以及**没有 Config 的插件
+长什么样** —— 行里没有 `config:`，插件页上就只有开关、没有配置页。这个「缺一个
+配置页」是**正确形态**，不是打包遗漏。
+
 ### 其它仍是裸模块的插件
 
-`dsh-tool-context7`、`dsh-tool-jenkins`、`dsh-tool-tourmind`、`dsh-tool-vision`、
-`dsh-tool-wecom`、`dsh-ask-popup`、`dsh-build-panel` 目前都还是「裸模块」形态
-（只有 `package.json` + `lib/`，靠手工拷贝激活）。要交付给别人的话，按第 4～7 节
-补上 `cordis.patch.yml`、`locale/`、`icon.svg`，并在 `package.json` 里加
-`dsh.bundle` / `engines.dsh` / 完整 `exports`，即可升级为标准 bundle。
+`dsh-tool-jenkins`、`dsh-tool-tourmind`、`dsh-tool-vision`、`dsh-tool-wecom`、
+`dsh-ask-popup` 目前都还是「裸模块」形态（只有 `package.json` + `lib/`，靠手工拷贝
+激活）。要交付给别人的话，按第 4～7 节补上 `cordis.patch.yml`、`locale/`、
+`icon.svg`，并在 `package.json` 里加 `dsh.bundle` / `engines.dsh` / 完整 `exports`，
+即可升级为标准 bundle。
 
 > 迁移时注意：`files` 必须包含新文件；如果该包之前是以裸模块拷进 profile 的，
 > 用 `dsh plugin add` 重装一次，让 `dsh.profile.bundles` 里出现它，否则它仍然只是

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Build workflow">
+  <rect width="64" height="64" fill="#1e3a8a"/>
+  <!-- The mark is the panel itself: a task list whose rows stand for
+       docs/<task> entries, plus the run control that hands one task to the
+       Agent. Row width encodes the two states the panel renders — a full row
+       for a task with a plan, a half row for one without — and the triangle is
+       the row's "run" control, the same gesture as the panel's button. Geometry
+       is on a 4px grid: rows are 40 units wide and 7 tall at y=12/24/36, the
+       short row ends at x=34, and the triangle spans x=40..52 about y=39.5 so it
+       clears the text rows above and below. -->
+  <g fill="#ffffff">
+    <rect x="12" y="12" width="40" height="7" rx="1"/>
+    <rect x="12" y="24" width="40" height="7" rx="1"/>
+    <rect x="12" y="36" width="22" height="7" rx="1"/>
+    <path d="M40 32L52 39.5L40 47Z"/>
+  </g>
+</svg>

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Build workflow",
+    "description": "Adds a Build panel to the sidebar and a /build command. The panel lists the task directories under docs/ in the current workspace, newest plan first, and shows each task's plan, todo list and latest hand-off note; the run button hands that task's workflow instruction to the current Agent. Both halves are one bundle, so disabling the plugin removes the panel and the command together."
+  }
+}
