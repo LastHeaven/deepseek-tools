@@ -45,6 +45,8 @@ window.__ModuleLoader__.load({
     const DEFAULT_API_KEY_ENV = "CONTEXT7_API_KEY";
     /** Fallback API base the schema and the bundled patch both declare. */
     const DEFAULT_API_URL = "https://context7.com/api";
+    /** Largest delay a timer accepts; the Host schema rejects anything above it. */
+    const MAX_TIMER_DELAY_MS = 2147483647;
 
     // -------------------------------------------------------------------------
     // Dictionaries
@@ -78,8 +80,10 @@ window.__ModuleLoader__.load({
       queryDocsHint: "Registers context7_query_docs to fetch version-specific documentation for a library ID.",
       outputBudget: "Maximum output characters",
       outputBudgetHint: "Truncation limit applied to every tool result.",
-      advanced: "Takes effect after a reload",
-      advancedHint: "timeoutMs and a literal apiKey cannot be edited here: they only apply when the plugin is rebuilt. Set them in cordis.patch.yml.",
+      timeoutMs: "Tool-call budget (ms)",
+      timeoutMsHint: "Cooperative per-call deadline. A call that reaches it is cancelled rather than abandoned.",
+      advanced: "About a literal key",
+      advancedHint: "A literal apiKey cannot be edited here: it only applies when the plugin is rebuilt. Set it in cordis.patch.yml, or paste the key above instead.",
       overridden: "Overridden",
       reset: "Reset",
       save: "Save",
@@ -122,8 +126,10 @@ window.__ModuleLoader__.load({
       queryDocsHint: "注册 context7_query_docs，按库 ID 拉取特定版本文档。",
       outputBudget: "输出字符上限",
       outputBudgetHint: "每次工具结果应用的截断长度。",
-      advanced: "重载后生效",
-      advancedHint: "timeoutMs 与直接填写的 apiKey 无法在此编辑：它们只在插件重建时生效，请在 cordis.patch.yml 中设置。",
+      timeoutMs: "单次调用时限（毫秒）",
+      timeoutMsHint: "协作式单次调用超时。到达时限会取消本次调用。",
+      advanced: "关于直填密钥",
+      advancedHint: "直接填写的 apiKey 无法在此编辑：它只在插件重建时生效。请在 cordis.patch.yml 中设置，或改用上方粘贴密钥。",
       overridden: "已覆盖",
       reset: "重置",
       save: "保存",
@@ -424,10 +430,12 @@ window.__ModuleLoader__.load({
       const refId = React.useId();
       const keyId = React.useId();
       const budgetId = React.useId();
+      const timeoutId = React.useId();
 
       const apiUrl = textOf(draft, value, "apiUrl", DEFAULT_API_URL);
       const apiKeyEnv = textOf(draft, value, "apiKeyEnv", DEFAULT_API_KEY_ENV);
       const budget = textOf(draft, value, "maxOutputChars", "200000");
+      const timeout = textOf(draft, value, "timeoutMs", "60000");
       const resolveLibraryId = boolOf(draft, value, "resolveLibraryId", true);
       const queryDocs = boolOf(draft, value, "queryDocs", true);
       const reference = apiKeyEnv.trim() || DEFAULT_API_KEY_ENV;
@@ -462,6 +470,15 @@ window.__ModuleLoader__.load({
           const parsed = Number(String(draft.maxOutputChars).trim());
           if (!Number.isInteger(parsed) || parsed < 1) problems.push(t("invalidNumber", { field: t("outputBudget") }));
           else stage("maxOutputChars", parsed);
+        }
+        if (Object.prototype.hasOwnProperty.call(draft, "timeoutMs")) {
+          const parsed = Number(String(draft.timeoutMs).trim());
+          // The Host schema caps a timer at MAX_TIMER_DELAY_MS and would refuse the
+          // write; checking it here turns a silent refusal into a message naming the
+          // field.
+          if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_TIMER_DELAY_MS) {
+            problems.push(t("invalidNumber", { field: t("timeoutMs") }));
+          } else stage("timeoutMs", parsed);
         }
         if (Object.prototype.hasOwnProperty.call(draft, "resolveLibraryId")) {
           stage("resolveLibraryId", draft.resolveLibraryId === true);
@@ -692,6 +709,25 @@ window.__ModuleLoader__.load({
           value: budget,
           disabled,
           onChange: (event) => edit("maxOutputChars", event.target.value)
+        })),
+
+        h(Field, {
+          t,
+          id: timeoutId,
+          label: t("timeoutMs"),
+          hint: t("timeoutMsHint"),
+          overridden: Object.prototype.hasOwnProperty.call(user, "timeoutMs"),
+          disabled,
+          onReset: () => void resetField("timeoutMs")
+        }, h("input", {
+          id: timeoutId,
+          className: "tc7-input",
+          type: "number",
+          min: 1,
+          step: 1,
+          value: timeout,
+          disabled,
+          onChange: (event) => edit("timeoutMs", event.target.value)
         })),
 
         h("hr", { className: "tc7-divider" }),

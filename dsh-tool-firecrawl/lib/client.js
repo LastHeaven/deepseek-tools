@@ -95,8 +95,10 @@ window.__ModuleLoader__.load({
       crawlMaxResultsHint: "Applied when firecrawl_crawl is called without a limit.",
       maxOutputChars: "Maximum output characters",
       maxOutputCharsHint: "Truncation limit applied to every tool result.",
-      advanced: "Takes effect after a reload",
-      advancedHint: "timeoutMs and a literal apiKey cannot be edited here: they only apply when the plugin is rebuilt. Set them in cordis.patch.yml.",
+      timeoutMs: "Tool-call budget (ms)",
+      timeoutMsHint: "Cooperative per-call deadline. A call that reaches it is cancelled; the crawl it started keeps running server-side.",
+      advanced: "Pixel-format notes",
+      advancedHint: "A literal apiKey cannot be edited here: it only applies when the plugin is rebuilt. Set it in cordis.patch.yml, or paste the key above instead.",
       overridden: "Overridden",
       reset: "Reset",
       save: "Save",
@@ -156,8 +158,10 @@ window.__ModuleLoader__.load({
       crawlMaxResultsHint: "firecrawl_crawl 未指定 limit 时使用。",
       maxOutputChars: "输出字符上限",
       maxOutputCharsHint: "每次工具结果应用的截断长度。",
-      advanced: "重载后生效",
-      advancedHint: "timeoutMs 与直接填写的 apiKey 无法在此编辑：它们只在插件重建时生效，请在 cordis.patch.yml 中设置。",
+      timeoutMs: "单次调用时限（毫秒）",
+      timeoutMsHint: "协作式单次调用超时。到达时限会取消本次调用；已启动的爬取任务仍在服务端继续。",
+      advanced: "关于直填密钥",
+      advancedHint: "直接填写的 apiKey 无法在此编辑：它只在插件重建时生效。请在 cordis.patch.yml 中设置，或改用上方粘贴密钥。",
       overridden: "已覆盖",
       reset: "重置",
       save: "保存",
@@ -434,15 +438,18 @@ window.__ModuleLoader__.load({
 
     /** The seven per-tool switches, in the order the page shows them. */
     const TOOL_FIELDS = ["scrape", "search", "developerSearch", "map", "parse", "crawl", "checkCrawlStatus"];
-    /** The four numeric limits, in the order the page shows them. */
-    const COUNT_FIELDS = ["searchMaxResults", "mapMaxResults", "crawlMaxResults", "maxOutputChars"];
+    /** The numeric limits, in the order the page shows them. */
+    const COUNT_FIELDS = ["searchMaxResults", "mapMaxResults", "crawlMaxResults", "maxOutputChars", "timeoutMs"];
     /** Schema defaults for the numeric limits, used when the Host value is absent. */
     const COUNT_DEFAULTS = {
       searchMaxResults: "8",
       mapMaxResults: "100",
       crawlMaxResults: "50",
-      maxOutputChars: "200000"
+      maxOutputChars: "200000",
+      timeoutMs: "60000"
     };
+    /** Largest delay a timer accepts; the Host schema rejects anything above it. */
+    const MAX_TIMER_DELAY_MS = 2147483647;
 
     const NOTICE = { ok: "fcw-statusOk", error: "fcw-statusError" };
 
@@ -473,7 +480,7 @@ window.__ModuleLoader__.load({
       const urlId = React.useId();
       const refId = React.useId();
       const keyId = React.useId();
-      const countIds = [React.useId(), React.useId(), React.useId(), React.useId()];
+      const countIds = COUNT_FIELDS.map(() => React.useId());
 
       const apiUrl = textOf(draft, value, "apiUrl", DEFAULT_API_URL);
       const apiKeyEnv = textOf(draft, value, "apiKeyEnv", DEFAULT_API_KEY_ENV);
@@ -508,7 +515,12 @@ window.__ModuleLoader__.load({
         for (const field of COUNT_FIELDS) {
           if (!Object.prototype.hasOwnProperty.call(draft, field)) continue;
           const parsed = Number(String(draft[field]).trim());
+          // The timeout has an upper bound the Host schema enforces: a timer cannot
+          // exceed MAX_TIMER_DELAY_MS, and the write would be refused by the loader.
+          // Checking it here turns a silent refusal into a message naming the field.
+          const tooLarge = field === "timeoutMs" && parsed > MAX_TIMER_DELAY_MS;
           if (!Number.isInteger(parsed) || parsed < 1) problems.push(t("invalidNumber", { field: t(field) }));
+          else if (tooLarge) problems.push(t("invalidNumber", { field: t(field) }));
           else stage(field, parsed);
         }
         for (const field of TOOL_FIELDS) {
@@ -739,10 +751,7 @@ window.__ModuleLoader__.load({
         h("div", { className: "fcw-group" },
           h("h4", { className: "fcw-groupTitle" }, t("limits")),
           h("div", { className: "fcw-counts" },
-            countField("searchMaxResults", countIds[0]),
-            countField("mapMaxResults", countIds[1]),
-            countField("crawlMaxResults", countIds[2]),
-            countField("maxOutputChars", countIds[3]))),
+            ...COUNT_FIELDS.map((field, index) => countField(field, countIds[index])))),
 
         h("hr", { className: "fcw-divider" }),
 

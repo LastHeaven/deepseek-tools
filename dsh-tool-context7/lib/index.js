@@ -57,8 +57,11 @@ const TOOL_WEB_FETCH_ORDER = 2100;
  *   store. Keeping it out of the volatile projection keeps a literal secret off
  *   the configuration wire entirely; the page edits `apiKeyEnv` and writes the
  *   secret itself through the credential store.
- * - `timeoutMs` is baked into each `defineTool` declaration, so a new value only
- *   takes effect when the definitions are rebuilt.
+ *
+ * `timeoutMs` IS volatile, but it needs more than the marker. `defineTool` copies
+ * the number it is handed, so a plain field would freeze at mount; the timeout
+ * policy reads `definition.timeoutMs` on every dispatch, so `withLiveTimeout()`
+ * installs a getter over the live reference instead. See its doc comment.
  *
  * `apiUrl` mirrors the bundled patch rather than being schema-required: the
  * bundle has to stay mountable with a placeholder, and the loud failure for a
@@ -71,7 +74,7 @@ const Config = z.object({
   apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV).volatile(),
   resolveLibraryId: z.boolean().default(true).volatile(),
   queryDocs: z.boolean().default(true).volatile(),
-  timeoutMs: z.number().step(1).min(1).default(DEFAULT_TIMEOUT_MS),
+  timeoutMs: z.number().step(1).min(1).max(2147483647).default(DEFAULT_TIMEOUT_MS).volatile(),
   maxOutputChars: z.number().step(1).min(1).default(200000).volatile()
 });
 
@@ -103,6 +106,50 @@ function readConfig(config) {
 
 function assertPositiveInteger(label, value) {
   if (!Number.isInteger(value) || value < 1) throw new Error(`tool-context7: ${label} must be a positive integer`);
+}
+
+/** Largest delay `setTimeout` accepts; `deadline()` rejects anything above it. */
+const MAX_TIMER_DELAY_MS = 2147483647;
+
+/**
+ * Read the per-call budget, falling back to the default for an unusable value.
+ *
+ * `deadline()` throws on a non-positive or non-finite timeout, and that throw
+ * lands inside the tool-call wrapper: one bad number would fail *every* tool call
+ * rather than one. The schema's `min(1)` and the loader's re-validation make this
+ * unreachable through the configuration page, so it is a guard for a hand-written
+ * patch or an expression, not the normal path.
+ */
+function timeoutOf(config) {
+  const value = readConfig(config).timeoutMs;
+  if (Number.isFinite(value) && value > 0 && value <= MAX_TIMER_DELAY_MS) return value;
+  return DEFAULT_TIMEOUT_MS;
+}
+
+/**
+ * Make one tool definition's `timeoutMs` track the live config reference.
+ *
+ * `defineTool` copies the number it is handed into the definition
+ * (`dsh-tools/lib/index.js`), so a plain field freezes at mount. It does not
+ * freeze the *definition* — `Object.isFrozen()` is false — and the enforcement
+ * site, `dsh-tool-call-timeout-policy`, reads `definition.timeoutMs` on every
+ * dispatch:
+ *
+ *   const timeoutMs = ctx.tools.get(exec.name, exec.agent)?.timeoutMs
+ *
+ * So redefining the property as a getter over the volatile reference is what
+ * makes a page edit arm the next call's deadline, with no rebuild and no second
+ * source of truth. `dsh-tools` also validates the definition at registration
+ * (a positive finite number), which the getter satisfies by construction.
+ */
+function withLiveTimeout(definition, config) {
+  assertPositiveInteger("timeoutMs", readConfig(config).timeoutMs);
+  Object.defineProperty(definition, "timeoutMs", {
+    configurable: true,
+    enumerable: true,
+    get: () => timeoutOf(config)
+  });
+  return definition;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +325,7 @@ function applyResolveLibraryIdTool(ctx, config) {
   promptSection(ctx, "tool:context7_resolve_library_id",
     () => (readConfig(config).resolveLibraryId === false ? "" :
       "Use the context7_resolve_library_id tool to map a library or product name to a Context7-compatible library ID before querying docs, unless the user already gave an ID in /org/project or /org/project/version form. Pick the match with the best name/reputation/snippet coverage, and do not call it more than 3 times per question."));
-  ctx.tools.register(defineTool({
+  ctx.tools.register(withLiveTimeout(defineTool({
     name: "context7_resolve_library_id",
     description: "Resolves a package/product name to a Context7-compatible library ID and returns matching libraries. Call this before context7_query_docs unless the user explicitly provides a library ID in the format '/org/project' or '/org/project/version'. Each result includes the library ID, name, description, code-snippet count, source reputation, benchmark score, and available versions.",
     parameters: {
@@ -296,14 +343,14 @@ function applyResolveLibraryIdTool(ctx, config) {
       return truncate(formatSearch(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.libraryName, kind: "context7-resolve", rawInput: args.libraryName })
-  }), { when: enabledWhen(config, "resolveLibraryId") });
+  }), config), { when: enabledWhen(config, "resolveLibraryId") });
 }
 
 function applyQueryDocsTool(ctx, config) {
   promptSection(ctx, "tool:context7_query_docs",
     () => (readConfig(config).queryDocs === false ? "" :
       "Use the context7_query_docs tool to fetch up-to-date, version-specific documentation and code examples for a library. Call context7_resolve_library_id first to get the exact ID, unless the user gave one. Keep each query to one concept, and do not call it more than 3 times per question."));
-  ctx.tools.register(defineTool({
+  ctx.tools.register(withLiveTimeout(defineTool({
     name: "context7_query_docs",
     description: "Retrieves and queries up-to-date documentation and code examples from Context7 for any programming library or framework. Requires an exact Context7-compatible library ID (e.g. '/mongodb/docs', '/vercel/next.js', '/supabase/supabase', '/vercel/next.js/v14.3.0-canary.87') from context7_resolve_library_id or the user. Scope the query to a single concept.",
     parameters: {
@@ -324,7 +371,7 @@ function applyQueryDocsTool(ctx, config) {
       return truncate(text, outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.libraryId, kind: "context7-docs", rawInput: args.libraryId })
-  }), { when: enabledWhen(config, "queryDocs") });
+  }), config), { when: enabledWhen(config, "queryDocs") });
 }
 
 // ---------------------------------------------------------------------------
@@ -342,9 +389,13 @@ function applyQueryDocsTool(ctx, config) {
  * Both tools are always registered; the per-tool switches are step-time `when`
  * conditions, and their prompt text is resolved per assembly. A page edit
  * therefore takes effect on the next request instead of waiting for a reload.
+ * The per-call budget follows the same rule through `withLiveTimeout()`, so
+ * changing it on the page arms the very next call's deadline.
  */
 function apply(ctx, config) {
   const initial = readConfig(config);
+  // Validate at mount as well: a broken value in a hand-written patch should fail
+  // where the loader prints it, not silently fall back on every call.
   assertPositiveInteger("timeoutMs", initial.timeoutMs);
 
   // Validate the URL at mount, not at the first model call: a blanked
@@ -352,6 +403,10 @@ function apply(ctx, config) {
   // surfacing as a confusing tool error mid-conversation. A page edit that
   // blanks it is caught per call by `baseUrl`.
   baseUrl(initial);
+
+  // Validated at its point of use instead: a snapshot checked once would go stale
+  // on the first page edit.
+  void outputBudget(initial);
 
   applyResolveLibraryIdTool(ctx, config);
   applyQueryDocsTool(ctx, config);
@@ -362,8 +417,10 @@ export {
   Config,
   DEFAULT_API_KEY_ENV,
   DEFAULT_TIMEOUT_MS,
+  MAX_TIMER_DELAY_MS,
   TOOL_WEB_FETCH_ORDER,
   apply,
   inject,
-  name
+  name,
+  withLiveTimeout
 };

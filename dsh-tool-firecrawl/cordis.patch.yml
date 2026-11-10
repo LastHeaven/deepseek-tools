@@ -14,15 +14,14 @@
 # request and keeps every setting here for the next enable.
 #
 # ── EDIT THE VALUES ON THE PLUGINS PAGE ──────────────────────────────────────
-# apiUrl, apiKeyEnv, the seven tool switches and the four count limits are all
-# `.volatile()`, so the row's own configuration page on the Plugins page edits
-# them and they take effect on the next tool call without a reload. The values
-# below are the bundle's defaults: the page writes only what you change, in the
-# profile's cordis.patch.yml, so this file keeps matching the shipped defaults.
+# apiUrl, apiKeyEnv, the seven tool switches, the four count limits and timeoutMs
+# are all `.volatile()`, so the row's own configuration page on the Plugins page
+# edits them and they take effect on the next tool call without a reload. The
+# values below are the bundle's defaults: the page writes only what you change, in
+# the profile's cordis.patch.yml, so this file keeps matching the shipped
+# defaults.
 #
-# timeoutMs is the exception. It is baked into each tool declaration, so editing
-# it here takes effect when the plugin is rebuilt. `apiKey` is likewise
-# patch-only, on purpose — see below.
+# `apiKey` is the one exception, and on purpose — see below.
 #
 # ── API URL ──────────────────────────────────────────────────────────────────
 # `apiUrl` is REQUIRED in practice. There is deliberately no built-in instance:

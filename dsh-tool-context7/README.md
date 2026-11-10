@@ -65,15 +65,55 @@ the page drops the drafts. The API key is the one exception — it has its own
 | `resolveLibraryId` | `true` | ✅ live | Expose `context7_resolve_library_id` |
 | `queryDocs` | `true` | ✅ live | Expose `context7_query_docs` |
 | `maxOutputChars` | `200000` | ✅ live | Hard cap on each tool's rendered output |
+| `timeoutMs` | `60000` | ✅ live | Cooperative per-call deadline. A call that reaches it is cancelled. The schema caps it at `2147483647`, the largest delay a timer accepts |
 | `apiKey` | `""` | ❌ patch only | Literal bearer token; wins over `apiKeyEnv` when set. Prefer leaving it empty |
-| `timeoutMs` | `60000` | ❌ patch only | Cooperative per-call budget attached to every tool |
 
-**Why two fields stay out of the page.** The settings surface projects only
-fields a plugin declares `.volatile()`, and a volatile field can change without
-rebuilding the plugin. `timeoutMs` is baked into each tool declaration, so a new
-value only applies when the definitions are rebuilt; `apiKey` is excluded so a
-literal secret never rides the configuration wire — the page edits `apiKeyEnv`
-instead and stores the secret itself. Edit both in `cordis.patch.yml`.
+**Why one field stays out of the page.** The settings surface projects only
+fields a plugin declares `.volatile()`. `apiKey` is excluded so a literal secret
+never rides the configuration wire — the page edits `apiKeyEnv` instead and stores
+the secret through the credential store. Set it in `cordis.patch.yml`.
+
+### Why `timeoutMs` needs more than `.volatile()`
+
+The timeout is enforced outside this plugin, by
+`@deepseek-ai/dsh-tool-call-timeout-policy`, which reads **the definition** on
+every dispatch:
+
+```js
+// dsh-tool-call-timeout-policy/lib/index.js
+const timeoutMs = ctx.tools.get(exec.name, exec.agent)?.timeoutMs;
+if (timeoutMs === void 0) return next();
+const d = deadline(exec.signal, timeoutMs, TOOL_TIMEOUT);
+```
+
+`defineTool` copies the number it is handed into that definition, so a plain
+config field would freeze at mount — the marker alone is not enough. The
+definition itself is not frozen (`Object.isFrozen()` is `false`), so
+`withLiveTimeout()` redefines `definition.timeoutMs` as a getter over the live
+reference:
+
+```js
+Object.defineProperty(definition, "timeoutMs", {
+  configurable: true,
+  enumerable: true,
+  get: () => timeoutOf(config)
+});
+```
+
+Three consequences worth knowing:
+
+- **It is genuinely live.** No rebuild, no second source of truth: the getter is
+  what the policy reads, so a page edit arms the next call's deadline.
+- **A bad value cannot take the tools down.** `deadline()` throws on a
+  non-positive or non-finite timeout, and that throw lands inside the tool-call
+  wrapper, so one bad number would fail *every* call rather than one. `timeoutOf()`
+  falls back to `DEFAULT_TIMEOUT_MS` for anything unusable, and the schema's
+  `min(1).max(2147483647)` plus the loader's re-validation keep the page from
+  writing one in the first place. The fallback covers a hand-written patch or an
+  `!!js` expression, which the loader does not re-validate.
+- **The property keeps its flags**, so `timeoutMs` stays enumerable to anything
+  that introspects the definition, and stays configurable so a rebuild can
+  redefine it.
 
 ### The API key
 
@@ -310,8 +350,14 @@ if the key input disappears, which is the state the page must never be in.
 - **`apiUrl` cannot be verified at mount.** The default is the hosted service, so
   only a blanked value is rejected eagerly; a wrong mirror surfaces on the first
   call.
-- **`timeoutMs` needs a reload.** It is baked into each tool declaration, so the
-  page cannot edit it and a patch edit applies when the plugin is rebuilt.
+- **A value already in flight keeps the old setting.** A request that started
+  before a page edit finishes under the value it started with; the next call picks
+  up the new one. That is how a cooperative budget works, not a cache.
+- **An unusable `timeoutMs` silently falls back.** A value the page cannot write
+  (the schema and the loader both refuse it) but a hand-written patch can reaches
+  `timeoutOf()` and becomes `DEFAULT_TIMEOUT_MS`. The alternative — letting
+  `deadline()` throw — would fail every tool call, so the fallback is deliberate;
+  it is also why nothing in the normal path can reach it.
 - **The page needs the settings composition.** It renders only where the profile
   mounts `config-editor` and `settings` and serves the entry as a volatile form;
   a headless profile keeps the plugin fully working but shows no page.
@@ -333,7 +379,7 @@ if the key input disappears, which is the state the page must never be in.
 | Version | Change |
 | --- | --- |
 | 1.0.0 | Ships as an installable, toggleable bundle: `dsh.bundle.patch`, locales, icon, `engines.dsh` |
-| 1.1.0 | Adds the browser half and the row configuration page. Five `Config` fields become `.volatile()`; both tools now register unconditionally and gate on a step-time `when`, so a page edit reaches the next request without a reload |
+| 1.1.0 | Adds the browser half and the row configuration page. Six `Config` fields become `.volatile()`; both tools now register unconditionally and gate on a step-time `when`, so a page edit reaches the next request without a reload. `timeoutMs` becomes live through `withLiveTimeout()`, which installs a getter over the volatile reference because `defineTool` copies the number and the timeout policy reads the definition per dispatch |
 
 The credential fixes and the styling pass since 1.1.0 are internal corrections —
 the wire shapes they addressed never worked, so no behaviour changed for anyone

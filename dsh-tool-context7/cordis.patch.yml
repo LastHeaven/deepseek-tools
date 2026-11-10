@@ -23,15 +23,13 @@
 #   GET /v2/context?query=<q>&libraryId=<id>            docs for one library
 #
 # ── EDIT THE VALUES ON THE PLUGINS PAGE ──────────────────────────────────────
-# apiUrl, apiKeyEnv, resolveLibraryId, queryDocs and maxOutputChars are all
-# `.volatile()`, so the row's own configuration page on the Plugins page edits
+# apiUrl, apiKeyEnv, resolveLibraryId, queryDocs, maxOutputChars and timeoutMs are
+# all `.volatile()`, so the row's own configuration page on the Plugins page edits
 # them and they take effect on the next tool call without a reload. The values
 # below are the bundle's defaults: the page writes only what you change, in the
 # profile's cordis.patch.yml, so this file keeps matching the shipped defaults.
 #
-# timeoutMs is the exception. It is baked into each tool declaration, so editing
-# it here takes effect when the plugin is rebuilt. `apiKey` is likewise
-# patch-only, on purpose — see below.
+# `apiKey` is the one exception, and on purpose — see below.
 #
 # ── API KEY: DO NOT PUT IT HERE ──────────────────────────────────────────────
 # No key is configured. The plugin resolves the credential reference named by

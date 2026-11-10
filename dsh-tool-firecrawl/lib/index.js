@@ -58,8 +58,11 @@ const DEFAULT_API_URL = "http://firecrawl.localhost";
  *   store. Keeping it out of the volatile projection keeps a literal secret off
  *   the configuration wire entirely; the page edits `apiKeyEnv` and writes the
  *   secret itself through the credential store.
- * - `timeoutMs` is baked into each `defineTool` declaration, so a new value only
- *   takes effect when the definitions are rebuilt.
+ *
+ * `timeoutMs` IS volatile, but it needs more than the marker. `defineTool` copies
+ * the number it is handed, so a plain field would freeze at mount; the timeout
+ * policy reads `definition.timeoutMs` on every dispatch, so `withLiveTimeout()`
+ * installs a getter over the live reference instead. See its doc comment.
  *
  * `apiUrl` mirrors the bundled patch rather than being schema-required: the
  * bundle has to stay mountable with a placeholder, and the loud failure for a
@@ -77,7 +80,7 @@ const Config = z.object({
   parse: z.boolean().default(true).volatile(),
   crawl: z.boolean().default(true).volatile(),
   checkCrawlStatus: z.boolean().default(true).volatile(),
-  timeoutMs: z.number().step(1).min(1).default(DEFAULT_TIMEOUT_MS),
+  timeoutMs: z.number().step(1).min(1).max(2147483647).default(DEFAULT_TIMEOUT_MS).volatile(),
   searchMaxResults: z.number().step(1).min(1).default(8).volatile(),
   mapMaxResults: z.number().step(1).min(1).default(100).volatile(),
   crawlMaxResults: z.number().step(1).min(1).default(50).volatile(),
@@ -116,6 +119,57 @@ function readConfig(config) {
     crawlMaxResults: unwrap(config.crawlMaxResults),
     maxOutputChars: unwrap(config.maxOutputChars)
   };
+}
+
+/** Largest delay `setTimeout` accepts; `deadline()` rejects anything above it. */
+const MAX_TIMER_DELAY_MS = 2147483647;
+
+/**
+ * Read the per-call budget, falling back to the default for an unusable value.
+ *
+ * `deadline()` throws on a non-positive or non-finite timeout, and that throw
+ * lands inside the tool-call wrapper: one bad number would fail *every* tool call
+ * rather than one. The schema's `min(1)` and the loader's re-validation make this
+ * unreachable through the configuration page, so it is a guard for a hand-written
+ * patch or an expression, not the normal path. Falling back keeps the tool usable
+ * and the plugin logs nothing it cannot fix.
+ */
+function timeoutOf(settings) {
+  const value = settings.timeoutMs;
+  if (Number.isFinite(value) && value > 0 && value <= MAX_TIMER_DELAY_MS) return value;
+  return DEFAULT_TIMEOUT_MS;
+}
+
+/**
+ * Make one tool definition's `timeoutMs` track the live config reference.
+ *
+ * `defineTool` copies the number it is handed into the definition
+ * (`dsh-tools/lib/index.js`), so a plain field freezes at mount. It does not
+ * freeze the *definition* — `Object.isFrozen()` is false — and the enforcement
+ * site, `dsh-tool-call-timeout-policy`, reads `definition.timeoutMs` on every
+ * dispatch:
+ *
+ *   const timeoutMs = ctx.tools.get(exec.name, exec.agent)?.timeoutMs
+ *
+ * So redefining the property as a getter over the volatile reference is what
+ * makes a page edit arm the next call's deadline, with no rebuild and no second
+ * source of truth. `dsh-tools` also validates the definition at registration
+ * (a positive finite number), which the getter satisfies by construction.
+ *
+ * The property keeps its flags so the value stays enumerable to anything that
+ * introspects the definition, and stays configurable so a rebuild is not blocked.
+ */
+function withLiveTimeout(definition, config) {
+  const initial = readConfig(config).timeoutMs;
+  Object.defineProperty(definition, "timeoutMs", {
+    configurable: true,
+    enumerable: true,
+    get: () => timeoutOf(readConfig(config))
+  });
+  // A validation failure here would be a bug in this file, not a user error, so
+  // fail at mount (where the loader shows it) rather than at the first call.
+  assertPositiveInteger("timeoutMs", initial);
+  return definition;
 }
 
 function assertPositiveInteger(label, value) {
@@ -395,7 +449,7 @@ function applyScrapeTool(ctx, config) {
   promptSection(ctx, "tool:firecrawl_scrape",
     () => (readConfig(config).scrape === false ? "" :
       "Use the firecrawl_scrape tool to retrieve the content of a specific URL through Firecrawl (a known page only). Use firecrawl_map or firecrawl_search to discover URLs, and firecrawl_crawl to collect many pages."));
-  ctx.tools.register(defineTool({
+  ctx.tools.register(withLiveTimeout(defineTool({
     name: "firecrawl_scrape",
     description: "Retrieve and extract content from one supplied URL through Firecrawl. Use this when a specific page is identified and needs its content or defined fields. Returns markdown (default), HTML, links, a screenshot, or JSON matching a supplied schema. Set maxAge: 0 to force a live fetch.",
     parameters: {
@@ -422,14 +476,14 @@ function applyScrapeTool(ctx, config) {
       return truncate(formatScrape(data, url), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.url, kind: "scrape", rawInput: args.url })
-  }), { when: enabledWhen(config, "scrape") });
+  }), config), { when: enabledWhen(config, "scrape") });
 }
 
 function applySearchTool(ctx, config) {
   promptSection(ctx, "tool:firecrawl_search",
     () => (readConfig(config).search === false ? "" :
       "Use the firecrawl_search tool to discover current information on the web through Firecrawl. It returns ranked results; cite the relevant URLs as markdown links. For a programming question, add categories: [\"developer\"]."));
-  ctx.tools.register(defineTool({
+  ctx.tools.register(withLiveTimeout(defineTool({
     name: "firecrawl_search",
     description: "Search the web through Firecrawl and return ranked results. Operators include quoted phrases, -term, site:host, inurl:term, and intitle:term. includeDomains and excludeDomains are mutually exclusive hostname filters; categories and sources limit result types.",
     parameters: {
@@ -460,11 +514,11 @@ function applySearchTool(ctx, config) {
       return truncate(formatSearch(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.query, kind: "search", rawInput: args.query })
-  }), { when: enabledWhen(config, "search") });
+  }), config), { when: enabledWhen(config, "search") });
 }
 
 function applyDeveloperSearchTool(ctx, config) {
-  ctx.tools.register(defineTool({
+  ctx.tools.register(withLiveTimeout(defineTool({
     name: "firecrawl_developer_search",
     description: "For a developer question — code behaviour, a library or framework, an API contract, an error message, or a known bug — search an index built for coding agents (GitHub issues, merged pull requests, repository READMEs, curated documentation). Set skills to \"only\" to search agent-skill files. On self-hosted instances without the developer index this degrades to a developer-category web search.",
     parameters: {
@@ -494,11 +548,11 @@ function applyDeveloperSearchTool(ctx, config) {
       return truncate(formatDeveloper(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.query, kind: "search", rawInput: args.query })
-  }), { when: enabledWhen(config, "developerSearch") });
+  }), config), { when: enabledWhen(config, "developerSearch") });
 }
 
 function applyMapTool(ctx, config) {
-  ctx.tools.register(defineTool({
+  ctx.tools.register(withLiveTimeout(defineTool({
     name: "firecrawl_map",
     description: "Enumerate URLs indexed under one website through Firecrawl without fetching each page's content. Use it for a site's URL inventory or to locate several relevant pages. Returns matching URLs rather than page bodies.",
     parameters: {
@@ -520,11 +574,11 @@ function applyMapTool(ctx, config) {
       return truncate(formatMap(data, url), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.url, kind: "map", rawInput: args.url })
-  }), { when: enabledWhen(config, "map") });
+  }), config), { when: enabledWhen(config, "map") });
 }
 
 function applyParseTool(ctx, config) {
-  ctx.tools.register(defineTool({
+  ctx.tools.register(withLiveTimeout(defineTool({
     name: "firecrawl_parse",
     description: "Parse one supported document (HTML, PDF, Word, RTF, OpenDocument, spreadsheet) into markdown, HTML, links, a summary, or JSON. Reads filePath from the local filesystem and uploads it to the configured Firecrawl instance. Remote web URLs belong in firecrawl_scrape.",
     parameters: {
@@ -577,11 +631,11 @@ function applyParseTool(ctx, config) {
       return truncate(formatParse(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.filePath, kind: "parse", rawInput: args.filePath })
-  }), { when: enabledWhen(config, "parse") });
+  }), config), { when: enabledWhen(config, "parse") });
 }
 
 function applyCrawlTool(ctx, config) {
-  ctx.tools.register(defineTool({
+  ctx.tools.register(withLiveTimeout(defineTool({
     name: "firecrawl_crawl",
     description: "Start a multi-page crawl at a website URL through Firecrawl and return the job id. Poll the job with firecrawl_check_crawl_status until it reaches completed or failed. Scope with include/exclude paths, depth, page limit, and subdomain/external-link controls. Returns the crawl id.",
     parameters: {
@@ -608,11 +662,11 @@ function applyCrawlTool(ctx, config) {
       return formatCrawlStarted(data, url);
     },
     presentCall: (args) => ({ card: "generic", title: args.url, kind: "crawl", rawInput: args.url })
-  }), { when: enabledWhen(config, "crawl") });
+  }), config), { when: enabledWhen(config, "crawl") });
 }
 
 function applyCheckCrawlStatusTool(ctx, config) {
-  ctx.tools.register(defineTool({
+  ctx.tools.register(withLiveTimeout(defineTool({
     name: "firecrawl_check_crawl_status",
     description: "Retrieve the current status, progress, and available results for an existing crawl id. This only reads Firecrawl job state and does not start or modify the crawl.",
     parameters: {
@@ -627,7 +681,7 @@ function applyCheckCrawlStatusTool(ctx, config) {
       return truncate(formatCrawlStatus(data), outputBudget(settings));
     },
     presentCall: (args) => ({ card: "generic", title: args.id, kind: "crawl", rawInput: args.id })
-  }), { when: enabledWhen(config, "checkCrawlStatus") });
+  }), config), { when: enabledWhen(config, "checkCrawlStatus") });
 }
 
 /** Guess a MIME type from a filename extension. */
@@ -673,9 +727,13 @@ function inferContentType(filename) {
  * All seven tools are always registered; the per-tool switches are step-time
  * `when` conditions, and their prompt text is resolved per assembly. A page edit
  * therefore takes effect on the next request instead of waiting for a reload.
+ * The per-call budget follows the same rule through `withLiveTimeout()`, so
+ * changing it on the page arms the very next call's deadline.
  */
 function apply(ctx, config) {
   const initial = readConfig(config);
+  // Validate at mount as well: a broken value in a hand-written patch should fail
+  // where the loader prints it, not silently fall back on every call.
   assertPositiveInteger("timeoutMs", initial.timeoutMs);
 
   // Validate the URL at mount, not at the first model call: an unconfigured
@@ -683,6 +741,13 @@ function apply(ctx, config) {
   // surfacing as a confusing tool error mid-conversation. A page edit that
   // blanks it is caught per call by `baseUrl`.
   baseUrl(initial);
+
+  // These take effect per call, so they are validated at their point of use
+  // rather than here: a snapshot checked once would go stale on the first edit.
+  void positiveInteger(initial, "maxOutputChars");
+  void positiveInteger(initial, "searchMaxResults");
+  void positiveInteger(initial, "mapMaxResults");
+  void positiveInteger(initial, "crawlMaxResults");
 
   applyScrapeTool(ctx, config);
   applySearchTool(ctx, config);
@@ -698,8 +763,10 @@ export {
   DEFAULT_API_KEY_ENV,
   DEFAULT_API_URL,
   DEFAULT_TIMEOUT_MS,
+  MAX_TIMER_DELAY_MS,
   TOOL_WEB_FETCH_ORDER,
   apply,
   inject,
-  name
+  name,
+  withLiveTimeout
 };

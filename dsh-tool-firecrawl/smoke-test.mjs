@@ -335,13 +335,13 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
         apiUrl: "http://firecrawl.mirror:3002",
         apiKeyEnv: "FIRECRAWL_MIRROR_KEY",
         scrape: true, search: false, developerSearch: true, map: true, parse: false, crawl: true, checkCrawlStatus: true,
-        searchMaxResults: 12, mapMaxResults: 40, crawlMaxResults: 25, maxOutputChars: 90000,
+        searchMaxResults: 12, mapMaxResults: 40, crawlMaxResults: 25, maxOutputChars: 90000, timeoutMs: 60000,
       },
       base: {
         apiUrl: "http://firecrawl.localhost",
         apiKeyEnv: "FIRECRAWL_API_KEY",
         scrape: true, search: true, developerSearch: true, map: true, parse: true, crawl: true, checkCrawlStatus: true,
-        searchMaxResults: 8, mapMaxResults: 100, crawlMaxResults: 50, maxOutputChars: 200000,
+        searchMaxResults: 8, mapMaxResults: 100, crawlMaxResults: 50, maxOutputChars: 200000, timeoutMs: 60000,
       },
       user: { apiUrl: "http://firecrawl.mirror:3002" },
       revision: 4,
@@ -445,11 +445,11 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
     const { inputs, switches } = collect(tree);
     check("renders all seven tool switches", switches.length === 7, `${switches.length} switch(es)`);
     const numberInputs = inputs.filter((props) => props.type === "number");
-    check("renders all four count fields", numberInputs.length === 4, `${numberInputs.length} number input(s)`);
+    check("renders every numeric limit field", numberInputs.length === 5, `${numberInputs.length} number input(s)`);
     check("renders text, URL and password inputs", inputs.some((p) => p.type === "url") && inputs.some((p) => p.type === "text") && inputs.some((p) => p.type === "password"),
       inputs.map((p) => p.type).join(", "));
     const defaulted = numberInputs.map((p) => String(p.value)).sort().join(",");
-    check("count fields show the accepted values", defaulted === "12,25,40,90000", defaulted);
+    check("numeric fields show the accepted values", defaulted === "12,25,40,60000,90000", defaulted);
     check("a switched-off tool shows unchecked", switches.some((p) => p["aria-checked"] === "false"),
       switches.map((p) => p["aria-label"]).join(", "));
   }
@@ -480,7 +480,7 @@ const INSTALLED = join(DSH_HOME, "profiles", PROFILE, "node_modules", "@deepseek
 const PLUGIN = process.env.FIRECRAWL_PLUGIN ?? pathToFileURL(existsSync(INSTALLED) ? INSTALLED : join(HERE, "lib", "index.js")).href;
 
 console.log(`\nplugin module: ${PLUGIN}`);
-const { apply, name, inject, Config, DEFAULT_API_URL, DEFAULT_API_KEY_ENV, TOOL_WEB_FETCH_ORDER } = await import(PLUGIN);
+const { apply, name, inject, Config, DEFAULT_API_URL, DEFAULT_API_KEY_ENV, DEFAULT_TIMEOUT_MS, MAX_TIMER_DELAY_MS, TOOL_WEB_FETCH_ORDER } = await import(PLUGIN);
 
 check("exports name", typeof name === "string" && name === "tool-firecrawl", name);
 check("injects tools and systemPrompt", JSON.stringify(inject) === JSON.stringify(["tools", "systemPrompt"]));
@@ -509,11 +509,11 @@ check(
 );
 
 // The page can only edit volatile fields — that is the whole mechanism, so assert
-// both directions: the editable ones project, and the secret/timeout do not.
+// both directions: the editable ones project, and the secret does not.
 const volatileFields = Object.entries(Config.toJSON().refs).filter(([, node]) => node?.meta?.volatile === true).length;
-check("schema declares volatile fields for the page", volatileFields >= 13, `${volatileFields} volatile nodes`);
+check("schema declares volatile fields for the page", volatileFields >= 14, `${volatileFields} volatile nodes`);
 check("apiKey stays out of the editable projection", read(config.apiKey) === "" && typeof config.apiKey === "string", typeof config.apiKey);
-check("timeoutMs stays plain (applied on reload)", typeof config.timeoutMs === "number", typeof config.timeoutMs);
+check("timeoutMs is a live reference", typeof config.timeoutMs?.get === "function", typeof config.timeoutMs);
 
 function makeCtx() {
   const registered = [];
@@ -623,6 +623,48 @@ check("tool descriptions carry no baked-in default count", registered.every(({ d
   } finally {
     globalThis.fetch = originalFetch;
   }
+}
+
+// The per-call budget. `defineTool` copies the number it is handed, so a plain
+// field would freeze at mount; `withLiveTimeout()` installs a getter instead.
+// What matters is not the getter but the WIRE: the timeout policy reads
+// `definition.timeoutMs` on every dispatch, so the live value must be visible
+// there, and an unusable value must not be.
+{
+  const cosmokit = await import("@deepseek-ai/cosmokit");
+  const { ctx: timeoutCtx, registered: timeoutRegistered } = makeCtx();
+  const timed = Config({ timeoutMs: 30000 });
+  apply(timeoutCtx, timed);
+  const defs = timeoutRegistered.map((entry) => entry.def);
+
+  check("every tool advertises the configured budget", defs.every((def) => def.timeoutMs === 30000),
+    defs.map((def) => def.timeoutMs).join(", "));
+  check("the definition is not frozen", defs.every((def) => !Object.isFrozen(def)));
+
+  cosmokit.updateVolatile(timed.timeoutMs, cosmokit.createVolatile(15000));
+  check("a live budget change reaches every definition", defs.every((def) => def.timeoutMs === 15000),
+    defs.map((def) => def.timeoutMs).join(", "));
+
+  // The value handed to `deadline()` is what the policy reads; it must be a plain
+  // positive number, because that call throws on anything else.
+  check("the live budget is a plain positive number",
+    defs.every((def) => Number.isFinite(def.timeoutMs) && def.timeoutMs > 0), typeof defs[0].timeoutMs);
+
+  // A hand-written patch can still hand over a bad value, and the loader's
+  // re-validation does not cover an `!!js` expression. One bad number must not
+  // fail every call, so the getter falls back to the default.
+  cosmokit.updateVolatile(timed.timeoutMs, cosmokit.createVolatile(0));
+  check("a zero budget falls back to the default instead of failing every call",
+    defs.every((def) => def.timeoutMs === DEFAULT_TIMEOUT_MS), defs.map((def) => def.timeoutMs).join(", "));
+  cosmokit.updateVolatile(timed.timeoutMs, cosmokit.createVolatile(NaN));
+  check("a NaN budget falls back to the default",
+    defs.every((def) => def.timeoutMs === DEFAULT_TIMEOUT_MS), defs.map((def) => def.timeoutMs).join(", "));
+  cosmokit.updateVolatile(timed.timeoutMs, cosmokit.createVolatile(MAX_TIMER_DELAY_MS + 1));
+  check("a budget above the timer limit falls back to the default",
+    defs.every((def) => def.timeoutMs === DEFAULT_TIMEOUT_MS), defs.map((def) => def.timeoutMs).join(", "));
+
+  // And the property stays an ordinary enumerable member for introspection.
+  check("the budget stays enumerable", Object.keys(defs[0]).includes("timeoutMs"), Object.keys(defs[0]).join(", "));
 }
 
 // A blank API URL must fail at mount, with the fix in the message. The schema

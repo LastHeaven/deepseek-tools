@@ -54,10 +54,18 @@ const checks = [
   ["resolveLibraryId is volatile", host.includes("resolveLibraryId: z.boolean().default(true).volatile()")],
   ["queryDocs is volatile", host.includes("queryDocs: z.boolean().default(true).volatile()")],
   ["maxOutputChars is volatile", host.includes("maxOutputChars: z.number().step(1).min(1).default(200000).volatile()")],
+  ["timeoutMs is volatile", host.includes("timeoutMs: z.number().step(1).min(1).max(2147483647).default(DEFAULT_TIMEOUT_MS).volatile()")],
   ["apiKey stays plain", /apiKey: z\.string\(\)\.default\(""\)/.test(host) && !host.includes("apiKey: z.string().default(\"\").volatile()")],
-  ["timeoutMs stays plain", /timeoutMs: z\.number\(\)\.step\(1\)\.min\(1\)\.default\(DEFAULT_TIMEOUT_MS\)/.test(host)],
-  ["README marks exactly those two as patch only", (read.match(/❌ patch only/g) ?? []).length === 2],
-  ["README marks five fields as live", (read.match(/✅ live/g) ?? []).length === 5],
+  ["README marks only apiKey as patch only", (read.match(/❌ patch only/g) ?? []).length === 1],
+  ["README marks six fields as live", (read.match(/✅ live/g) ?? []).length === 6],
+
+  // The live timeout is the getter, not the copied number.
+  ["every registration wraps its definition", (host.match(/withLiveTimeout\(defineTool\(\{/g) ?? []).length === 2,
+    `${(host.match(/withLiveTimeout\(defineTool\(\{/g) ?? []).length} wrapped registration(s)`],
+  ["the getter reads the live reference", /get:\s*\(\)\s*=>\s*timeoutOf\(config\)/.test(host)],
+  ["an unusable budget falls back to the default", /return DEFAULT_TIMEOUT_MS/.test(host)],
+  ["README explains the getter", read.includes("withLiveTimeout") && read.includes("definition.timeoutMs")],
+  ["README names the enforcement site", read.includes("dsh-tool-call-timeout-policy")],
 
   // The credential wire contract.
   ["code reads the dotted namespace key", client.includes('ctx.get("remote.credentials")')],

@@ -74,15 +74,24 @@ const checks = [
   ["README names the namespace", read.includes("toolFirecrawl")],
 
   // Which fields the page edits: volatile in the Host half, listed in the table.
-  ["the Host half marks 13 fields volatile", volatileFields.length === 13, volatileFields.join(", ")],
-  ["the client form edits exactly those 13 fields",
+  ["the Host half marks 14 fields volatile", volatileFields.length === 14, volatileFields.join(", ")],
+  ["the client form edits exactly those 14 fields",
     JSON.stringify([...editedFields].sort()) === JSON.stringify(volatileFields),
     `client: ${[...editedFields].sort().join(", ")}`],
   ["apiKey stays plain", schemaLine("apiKey").includes('apiKey: z.string().default("")') && !schemaLine("apiKey").includes(".volatile()"), schemaLine("apiKey")],
-  ["timeoutMs stays plain", schemaLine("timeoutMs").includes("timeoutMs: z.number()") && !schemaLine("timeoutMs").includes(".volatile()"), schemaLine("timeoutMs")],
-  ["README marks exactly those two as patch only", (read.match(/❌ patch only/g) ?? []).length === 2],
-  ["README marks thirteen fields as live", (read.match(/✅ live/g) ?? []).length === 13],
+  ["timeoutMs is volatile", schemaLine("timeoutMs").includes("timeoutMs: z.number()") && schemaLine("timeoutMs").includes(".volatile()"), schemaLine("timeoutMs")],
+  ["the timeout is bounded by the timer limit", schemaLine("timeoutMs").includes("max(2147483647)"), schemaLine("timeoutMs")],
+  ["README marks only apiKey as patch only", (read.match(/❌ patch only/g) ?? []).length === 1],
+  ["README marks fourteen fields as live", (read.match(/✅ live/g) ?? []).length === 14],
   ["the README table lists every edited field", editedFields.every((field) => read.includes(`\`${field}\``))],
+
+  // The live timeout is the getter, not the copied number.
+  ["every registration wraps its definition", (host.match(/withLiveTimeout\(defineTool\(\{/g) ?? []).length === 7,
+    `${(host.match(/withLiveTimeout\(defineTool\(\{/g) ?? []).length} wrapped registration(s)`],
+  ["the getter reads the live reference", /get:\s*\(\)\s*=>\s*timeoutOf\(readConfig\(config\)\)/.test(host)],
+  ["an unusable budget falls back to the default", /return DEFAULT_TIMEOUT_MS/.test(host)],
+  ["README explains the getter", read.includes("withLiveTimeout") && read.includes("definition.timeoutMs")],
+  ["README names the enforcement site", read.includes("dsh-tool-call-timeout-policy")],
 
   // The credential wire contract.
   ["code reads the dotted namespace key", client.includes('ctx.get("remote.credentials")')],

@@ -102,7 +102,15 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
     let cursor = 0;
     return {
       React: {
-        createElement: (type, props, ...children) => ({ type, props, children }),
+        // Mirror React by folding children into props: `Field` reads
+        // `props.children`, so a fake that keeps them only in the element would
+        // render every field empty and hide the controls from the assertions.
+        createElement: (type, props, ...children) => {
+          const merged = { ...(props ?? {}) };
+          if (children.length === 1) merged.children = children[0];
+          else if (children.length > 1) merged.children = children;
+          return { type, props: merged, children };
+        },
         useState(initial) {
           const index = cursor++;
           if (!(index in states)) states[index] = initial;
@@ -260,8 +268,8 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
   const form = {
     state: {
       status: "ready",
-      value: { apiUrl: "https://context7.mirror/api", apiKeyEnv: "CONTEXT7_MIRROR_KEY", resolveLibraryId: true, queryDocs: false, maxOutputChars: 120000 },
-      base: { apiUrl: "https://context7.com/api", apiKeyEnv: "CONTEXT7_API_KEY", resolveLibraryId: true, queryDocs: true, maxOutputChars: 200000 },
+      value: { apiUrl: "https://context7.mirror/api", apiKeyEnv: "CONTEXT7_MIRROR_KEY", resolveLibraryId: true, queryDocs: false, maxOutputChars: 120000, timeoutMs: 60000 },
+      base: { apiUrl: "https://context7.com/api", apiKeyEnv: "CONTEXT7_API_KEY", resolveLibraryId: true, queryDocs: true, maxOutputChars: 200000, timeoutMs: 60000 },
       user: { apiUrl: "https://context7.mirror/api" },
       revision: 3,
       writable: true,
@@ -326,6 +334,42 @@ const clientSource = readFileSync(join(HERE, "lib", "client.js"), "utf8");
   {
     const tree = render("page renders with a stored key", { t, view: "page", form, ctx: createCtx({ stored: "ctx7sk-secret" }).ctx });
     check("the key input still renders with a stored key", textOf(tree).includes("PASSWORD_INPUT"));
+  }
+
+  // Every field the Host projects must appear as a control. The walker expands
+  // function components the way a renderer would: without that, `h(Field, …)`
+  // stays an unrendered element and the inputs inside it are invisible to the
+  // assertion — a false negative on the one thing this check exists to catch.
+  function collect(tree) {
+    const inputs = [];
+    const seen = new Set();
+    (function walk(node, depth) {
+      if (node === null || node === undefined || depth > 40) return;
+      if (Array.isArray(node)) { for (const child of node) walk(child, depth); return; }
+      if (typeof node !== "object") return;
+      if (typeof node.type === "function") {
+        if (seen.has(node.type)) return;
+        seen.add(node.type);
+        walk(node.type(node.props ?? {}), depth + 1);
+        seen.delete(node.type);
+        return;
+      }
+      if (node.type === "input") inputs.push(node.props ?? {});
+      for (const child of node.children ?? []) walk(child, depth + 1);
+    })(tree, 0);
+    return inputs;
+  }
+
+  {
+    const tree = render("page renders every numeric field", { t, view: "page", form, ctx: createCtx().ctx });
+    const inputs = collect(tree);
+    const numbers = inputs.filter((props) => props.type === "number");
+    check("renders both numeric fields", numbers.length === 2, `${numbers.length} number input(s)`);
+    const values = numbers.map((props) => String(props.value)).sort().join(",");
+    check("numeric fields show the accepted values", values === "120000,60000", values);
+    check("renders URL, text and password inputs",
+      inputs.some((p) => p.type === "url") && inputs.some((p) => p.type === "text") && inputs.some((p) => p.type === "password"),
+      inputs.map((p) => p.type).join(", "));
   }
 
   // The page must not import the primitives package; the plan forbids it, and
@@ -399,7 +443,7 @@ const INSTALLED = join(DSH_HOME, "profiles", PROFILE, "node_modules", "@deepseek
 const PLUGIN = process.env.CONTEXT7_PLUGIN ?? pathToFileURL(existsSync(INSTALLED) ? INSTALLED : join(HERE, "lib", "index.js")).href;
 
 console.log(`\nplugin module: ${PLUGIN}`);
-const { apply, name, inject, Config, API_BASE_URL, DEFAULT_API_KEY_ENV, TOOL_WEB_FETCH_ORDER } = await import(PLUGIN);
+const { apply, name, inject, Config, API_BASE_URL, DEFAULT_API_KEY_ENV, DEFAULT_TIMEOUT_MS, MAX_TIMER_DELAY_MS, TOOL_WEB_FETCH_ORDER } = await import(PLUGIN);
 
 check("exports name", typeof name === "string" && name === "tool-context7", name);
 check("injects tools and systemPrompt", JSON.stringify(inject) === JSON.stringify(["tools", "systemPrompt"]));
@@ -425,11 +469,11 @@ check(
 );
 
 // The page can only edit volatile fields — that is the whole mechanism, so assert
-// both directions: the editable ones project, and the secret/timeout do not.
+// both directions: the editable ones project, and the secret does not.
 const volatileFields = Object.entries(Config.toJSON().refs).filter(([, node]) => node?.meta?.volatile === true).length;
-check("schema declares volatile fields for the page", volatileFields >= 5, `${volatileFields} volatile nodes`);
+check("schema declares volatile fields for the page", volatileFields >= 6, `${volatileFields} volatile nodes`);
 check("apiKey stays out of the editable projection", read(config.apiKey) === "" && typeof config.apiKey === "string", typeof config.apiKey);
-check("timeoutMs stays plain (applied on reload)", typeof config.timeoutMs === "number", typeof config.timeoutMs);
+check("timeoutMs is a live reference", typeof config.timeoutMs?.get === "function", typeof config.timeoutMs);
 
 function makeCtx() {
   const registered = [];
@@ -504,6 +548,40 @@ check("enabled tools contribute guidance", texts.every((text) => typeof text ===
   cosmokit.updateVolatile(live.resolveLibraryId, cosmokit.createVolatile(false));
   const after = liveRegistered[0].options.when({ agent: { id: "a" }, signal: AbortSignal.abort() });
   check("a live reference change reaches the switch", before === true && after === false, `${before} -> ${after}`);
+}
+
+// The per-call budget. `defineTool` copies the number it is handed, so a plain
+// field would freeze at mount; `withLiveTimeout()` installs a getter instead.
+// What matters is not the getter but the WIRE: the timeout policy reads
+// `definition.timeoutMs` on every dispatch, so the live value must be visible
+// there, and an unusable value must not be.
+{
+  const cosmokit = await import("@deepseek-ai/cosmokit");
+  const { ctx: timeoutCtx, registered: timeoutRegistered } = makeCtx();
+  const timed = Config({ timeoutMs: 30000 });
+  apply(timeoutCtx, timed);
+  const defs = timeoutRegistered.map(({ def }) => def);
+
+  check("every tool advertises the configured budget", defs.every((def) => def.timeoutMs === 30000),
+    defs.map((def) => def.timeoutMs).join(", "));
+  check("the definition is not frozen", defs.every((def) => !Object.isFrozen(def)));
+
+  cosmokit.updateVolatile(timed.timeoutMs, cosmokit.createVolatile(15000));
+  check("a live budget change reaches every definition", defs.every((def) => def.timeoutMs === 15000),
+    defs.map((def) => def.timeoutMs).join(", "));
+  check("the live budget is a plain positive number",
+    defs.every((def) => Number.isFinite(def.timeoutMs) && def.timeoutMs > 0), typeof defs[0].timeoutMs);
+
+  // A hand-written patch can still hand over a bad value, and the loader's
+  // re-validation does not cover an `!!js` expression. One bad number must not
+  // fail every call, so the getter falls back to the default.
+  cosmokit.updateVolatile(timed.timeoutMs, cosmokit.createVolatile(0));
+  check("a zero budget falls back to the default instead of failing every call",
+    defs.every((def) => def.timeoutMs === DEFAULT_TIMEOUT_MS), defs.map((def) => def.timeoutMs).join(", "));
+  cosmokit.updateVolatile(timed.timeoutMs, cosmokit.createVolatile(MAX_TIMER_DELAY_MS + 1));
+  check("a budget above the timer limit falls back to the default",
+    defs.every((def) => def.timeoutMs === DEFAULT_TIMEOUT_MS), defs.map((def) => def.timeoutMs).join(", "));
+  check("the budget stays enumerable", Object.keys(defs[0]).includes("timeoutMs"), Object.keys(defs[0]).join(", "));
 }
 
 // A blank API URL must fail at mount, with the fix in the message. The schema
